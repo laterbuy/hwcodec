@@ -9,7 +9,6 @@
 #include <d3dcompiler.h>
 #include <directxcolors.h>
 #include <iostream>
-#include <libavutil/pixfmt.h>
 #include <thread>
 
 #include "callback.h"
@@ -168,7 +167,7 @@ public:
       return -1;
     }
     last_video_format_ = dec_->GetLatestVideoFormat();
-    cudaVideoSurfaceFormat format = dec_->GetOutputFormat();
+    (void)dec_->GetOutputFormat();
     int width = dec_->GetWidth();
     int height = dec_->GetHeight();
     if (prepare_tried_ && (width != width_ || height != height_)) {
@@ -421,7 +420,7 @@ private:
     // set SRV
     std::array<ID3D11ShaderResourceView *, 2> const textureViews = {
         SRV_[0].Get(), SRV_[1].Get()};
-    native_->context_->PSSetShaderResources(0, textureViews.size(),
+    native_->context_->PSSetShaderResources(0, static_cast<UINT>(textureViews.size()),
                                             textureViews.data());
     return true;
   }
@@ -482,7 +481,7 @@ private:
          D3D11_INPUT_PER_VERTEX_DATA, 0},
     }};
     ComPtr<ID3D11InputLayout> inputLayout = NULL;
-    HRB(native_->device_->CreateInputLayout(Layout.data(), Layout.size(), g_VS,
+    HRB(native_->device_->CreateInputLayout(Layout.data(), static_cast<UINT>(Layout.size()), g_VS,
                                             ARRAYSIZE(g_VS),
                                             inputLayout.GetAddressOf()));
     native_->context_->IASetInputLayout(inputLayout.Get());
@@ -594,7 +593,7 @@ int nv_decode_driver_support() {
     load_driver(&cudl, &cvdl);
     free_driver(&cudl, &cvdl);
     return 0;
-  } catch (const std::exception &e) {
+  } catch (const std::exception &) {
   }
   return -1;
 }

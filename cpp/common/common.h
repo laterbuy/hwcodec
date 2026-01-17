@@ -35,7 +35,6 @@ enum Vendor {
   VENDOR_NV = 0,
   VENDOR_AMD = 1,
   VENDOR_INTEL = 2,
-  VENDOR_FFMPEG = 3
 };
 
 enum Quality { Quality_Default, Quality_High, Quality_Medium, Quality_Low };
@@ -52,5 +51,13 @@ enum HwcodecErrno {
   HWCODEC_ERR_COMMON = -1,
   HWCODEC_ERR_HEVC_COULD_NOT_FIND_POC = -2,
 };
+
+// Color space constants (replacing FFmpeg AVCOL_* constants)
+#define AVCOL_SPC_BT709 1
+#define AVCOL_SPC_SMPTE170M 6
+#define AVCOL_PRI_BT709 1
+#define AVCOL_PRI_SMPTE170M 6
+#define AVCOL_TRC_BT709 1
+#define AVCOL_TRC_SMPTE170M 6
 
 #endif // COMMON_H

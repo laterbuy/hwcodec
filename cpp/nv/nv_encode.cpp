@@ -9,7 +9,6 @@
 #include <dynlink_loader.h>
 #include <fstream>
 #include <iostream>
-#include <libavutil/pixfmt.h>
 #include <memory>
 
 #include <d3d11.h>
@@ -195,7 +194,7 @@ public:
                         : 0;
       if (packet.data.size() > 0) {
         if (callback)
-          callback(packet.data.data(), packet.data.size(), key, obj, ms);
+          callback(packet.data.data(), static_cast<int32_t>(packet.data.size()), key, obj, ms);
         encoded = true;
       }
     }

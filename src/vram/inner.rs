@@ -1,3 +1,5 @@
+#![allow(non_snake_case)]
+
 use crate::common::{DataFormat, DecodeCallback, EncodeCallback};
 use std::os::raw::{c_int, c_void};
 

@@ -22,7 +22,7 @@ fn main() {
 
         let en_ctx = EncodeContext {
             f: FeatureContext {
-                driver: Driver::FFMPEG,
+                driver: Driver::NV,
                 vendor: Driver::NV,
                 data_format,
                 luid,
@@ -38,7 +38,7 @@ fn main() {
         };
         let de_ctx = DecodeContext {
             device: Some(render.device()),
-            driver: Driver::FFMPEG,
+            driver: Driver::NV,
             vendor: Driver::NV,
             data_format,
             luid,

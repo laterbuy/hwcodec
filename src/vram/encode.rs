@@ -1,8 +1,7 @@
 use crate::{
     common::Driver::*,
-    ffmpeg::init_av_log,
     vram::{
-        amf, ffmpeg, inner::EncodeCalls, mfx, nv, DynamicContext, EncodeContext, FeatureContext,
+        amf, inner::EncodeCalls, mfx, nv, DynamicContext, EncodeContext, FeatureContext,
     },
 };
 use log::trace;
@@ -22,7 +21,6 @@ unsafe impl Sync for Encoder {}
 
 impl Encoder {
     pub fn new(ctx: EncodeContext) -> Result<Self, ()> {
-        init_av_log();
         if ctx.d.width % 2 == 1 || ctx.d.height % 2 == 1 {
             return Err(());
         }
@@ -30,7 +28,6 @@ impl Encoder {
             NV => nv::encode_calls(),
             AMF => amf::encode_calls(),
             MFX => mfx::encode_calls(),
-            FFMPEG => ffmpeg::encode_calls(),
         };
         unsafe {
             let codec = (calls.new)(
@@ -131,12 +128,6 @@ pub fn available(d: DynamicContext) -> Vec<FeatureContext> {
 
     let mut natives: Vec<_> = vec![];
     natives.append(
-        &mut ffmpeg::possible_support_encoders()
-            .drain(..)
-            .map(|n| (FFMPEG, n))
-            .collect(),
-    );
-    natives.append(
         &mut nv::possible_support_encoders()
             .drain(..)
             .map(|n| (NV, n))
@@ -180,7 +171,6 @@ pub fn available(d: DynamicContext) -> Vec<FeatureContext> {
             NV => nv::encode_calls().test,
             AMF => amf::encode_calls().test,
             MFX => mfx::encode_calls().test,
-            FFMPEG => ffmpeg::encode_calls().test,
         };
 
         let mut luids: Vec<i64> = vec![0; crate::vram::MAX_ADATERS];

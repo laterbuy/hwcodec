@@ -5,6 +5,7 @@
 #include <public/include/components/VideoEncoderAV1.h>
 #include <public/include/components/VideoEncoderHEVC.h>
 #include <public/include/components/VideoEncoderVCE.h>
+#include <public/include/components/VideoConverter.h>
 #include <public/include/core/Platform.h>
 #include <stdio.h>
 
@@ -80,6 +81,9 @@ private:
   bool full_range_ = false;
   bool bt709_ = false;
 
+  // Converter for HEVC (BGRA -> NV12)
+  amf::AMFComponentPtr AMFConverter_ = NULL;
+
   // Buffers
   std::vector<uint8_t> packetDataBuffer_;
 
@@ -125,6 +129,36 @@ public:
       break;
     }
     surface->SetPts(ms * AMF_MILLISECOND);
+
+    // For HEVC encoder, convert BGRA to NV12
+    if (codec_ == amf_wstring(AMFVideoEncoder_HEVC)) {
+      if (!AMFConverter_) {
+        res = AMFFactory_.GetFactory()->CreateComponent(
+            AMFContext_, AMFVideoConverter, &AMFConverter_);
+        AMF_CHECK_RETURN(res, "CreateConverter failed");
+        res = AMFConverter_->SetProperty(AMF_VIDEO_CONVERTER_MEMORY_TYPE,
+                                         AMFMemoryType_);
+        AMF_CHECK_RETURN(res, "SetProperty AMF_VIDEO_CONVERTER_MEMORY_TYPE failed");
+        res = AMFConverter_->SetProperty(AMF_VIDEO_CONVERTER_OUTPUT_FORMAT,
+                                         amf::AMF_SURFACE_NV12);
+        AMF_CHECK_RETURN(res, "SetProperty AMF_VIDEO_CONVERTER_OUTPUT_FORMAT failed");
+        res = AMFConverter_->SetProperty(AMF_VIDEO_CONVERTER_OUTPUT_SIZE,
+                                         ::AMFConstructSize(resolution_.first, resolution_.second));
+        AMF_CHECK_RETURN(res, "SetProperty AMF_VIDEO_CONVERTER_OUTPUT_SIZE failed");
+        res = AMFConverter_->Init(amf::AMF_SURFACE_BGRA, resolution_.first, resolution_.second);
+        AMF_CHECK_RETURN(res, "Init converter failed");
+      }
+      amf::AMFDataPtr convertData;
+      res = AMFConverter_->SubmitInput(surface);
+      AMF_CHECK_RETURN(res, "Converter SubmitInput failed");
+      res = AMFConverter_->QueryOutput(&convertData);
+      AMF_CHECK_RETURN(res, "Converter QueryOutput failed");
+      surface = amf::AMFSurfacePtr(convertData);
+      if (!surface) {
+        return AMF_FAIL;
+      }
+    }
+
     res = AMFEncoder_->SubmitInput(surface);
     AMF_CHECK_RETURN(res, "SubmitInput failed");
 
@@ -143,7 +177,7 @@ public:
         packet.data = packetDataBuffer_.data();
         std::memcpy(packet.data, pBuffer->GetNative(), packet.size);
         if (callback)
-          callback(packet.data, packet.size, packet.keyframe, obj, ms);
+          callback(packet.data, static_cast<int32_t>(packet.size), packet.keyframe, obj, ms);
         encoded = true;
       }
       pBuffer = NULL;
@@ -155,6 +189,10 @@ public:
   }
 
   AMF_RESULT destroy() {
+    if (AMFConverter_) {
+      AMFConverter_->Terminate();
+      AMFConverter_ = NULL;
+    }
     if (AMFEncoder_) {
       AMFEncoder_->Terminate();
       AMFEncoder_ = NULL;
@@ -168,25 +206,31 @@ public:
   }
 
   AMF_RESULT test() {
-    AMF_RESULT res = AMF_OK;
-    amf::AMFSurfacePtr surface = nullptr;
-    res = AMFContext_->AllocSurface(AMFMemoryType_, AMFSurfaceFormat_,
-                                    resolution_.first, resolution_.second,
-                                    &surface);
-    AMF_CHECK_RETURN(res, "AllocSurface failed");
-    if (surface->GetPlanesCount() < 1)
+    try {
+      AMF_RESULT res = AMF_OK;
+      amf::AMFSurfacePtr surface = nullptr;
+      res = AMFContext_->AllocSurface(AMFMemoryType_, AMFSurfaceFormat_,
+                                      resolution_.first, resolution_.second,
+                                      &surface);
+      if (res != AMF_OK) {
+        return AMF_FAIL;
+      }
+      if (surface->GetPlanesCount() < 1)
+        return AMF_FAIL;
+      void *native = surface->GetPlaneAt(0)->GetNative();
+      if (!native)
+        return AMF_FAIL;
+      int32_t key_obj = 0;
+      auto start = util::now();
+      res = encode(native, util_encode::vram_encode_test_callback, &key_obj, 0);
+      int64_t elapsed = util::elapsed_ms(start);
+      if (res == AMF_OK && key_obj == 1 && elapsed < TEST_TIMEOUT_MS) {
+        return AMF_OK;
+      }
       return AMF_FAIL;
-    void *native = surface->GetPlaneAt(0)->GetNative();
-    if (!native)
+    } catch (...) {
       return AMF_FAIL;
-    int32_t key_obj = 0;
-    auto start = util::now();
-    res = encode(native, util_encode::vram_encode_test_callback, &key_obj, 0);
-    int64_t elapsed = util::elapsed_ms(start);
-    if (res == AMF_OK && key_obj == 1 && elapsed < TEST_TIMEOUT_MS) {
-      return AMF_OK;
     }
-    return AMF_FAIL;
   }
 
   AMF_RESULT initialize() {
@@ -223,7 +267,13 @@ public:
     res = SetParams(codec_);
     AMF_CHECK_RETURN(res, "Could not set params in encoder.");
 
-    res = AMFEncoder_->Init(AMFSurfaceFormat_, resolution_.first,
+    // HEVC encoder requires NV12 format, not BGRA
+    amf::AMF_SURFACE_FORMAT initFormat = AMFSurfaceFormat_;
+    if (codec_ == amf_wstring(AMFVideoEncoder_HEVC)) {
+      initFormat = amf::AMF_SURFACE_NV12;
+    }
+
+    res = AMFEncoder_->Init(initFormat, resolution_.first,
                             resolution_.second);
     AMF_CHECK_RETURN(res, "encoder->Init() failed");
 
@@ -235,10 +285,12 @@ private:
     AMF_RESULT res;
     if (codecStr == amf_wstring(AMFVideoEncoderVCE_AVC)) {
       // ------------- Encoder params usage---------------
+      // Use LOW_LATENCY instead of LOW_LATENCY_HIGH_QUALITY to avoid assertion failures
+      // on drivers that don't support usage value 5
       res = AMFEncoder_->SetProperty(
           AMF_VIDEO_ENCODER_USAGE,
-          AMF_VIDEO_ENCODER_USAGE_LOW_LATENCY_HIGH_QUALITY);
-      AMF_CHECK_RETURN(res, "SetProperty AMF_VIDEO_ENCODER_USAGE failed");
+          AMF_VIDEO_ENCODER_USAGE_LOW_LATENCY);
+      // Don't fail if usage setting fails - some drivers may not support all usage values
 
       // ------------- Encoder params static---------------
       res = AMFEncoder_->SetProperty(
@@ -255,10 +307,12 @@ private:
                                      AMF_VIDEO_ENCODER_QUALITY_PRESET_QUALITY);
       AMF_CHECK_RETURN(res,
                        "SetProperty AMF_VIDEO_ENCODER_QUALITY_PRESET failed");
-      res =
-          AMFEncoder_->SetProperty(AMF_VIDEO_ENCODER_COLOR_BIT_DEPTH, eDepth_);
-      AMF_CHECK_RETURN(res,
-                       "SetProperty(AMF_VIDEO_ENCODER_COLOR_BIT_DEPTH  failed");
+      // COLOR_BIT_DEPTH may not be supported on all drivers - make it optional
+      res = AMFEncoder_->SetProperty(AMF_VIDEO_ENCODER_COLOR_BIT_DEPTH, eDepth_);
+      if (res != AMF_OK) {
+        // Log warning but don't fail - this property is optional
+        LOG_DEBUG(std::string("SetProperty AMF_VIDEO_ENCODER_COLOR_BIT_DEPTH failed (not supported), continuing"));
+      }
       res = AMFEncoder_->SetProperty(AMF_VIDEO_ENCODER_RATE_CONTROL_METHOD,
                                      AMF_VIDEO_ENCODER_RATE_CONTROL_METHOD_CBR);
       AMF_CHECK_RETURN(res,
@@ -277,26 +331,33 @@ private:
       res = AMFEncoder_->SetProperty(AMF_VIDEO_ENCODER_FULL_RANGE_COLOR,
                                      full_range_);
       AMF_CHECK_RETURN(res, "SetProperty AMF_VIDEO_ENCODER_FULL_RANGE_COLOR");
+      // OUTPUT_COLOR_PROFILE may not be supported on all drivers - make it optional
       res = AMFEncoder_->SetProperty<amf_int64>(
           AMF_VIDEO_ENCODER_OUTPUT_COLOR_PROFILE,
           bt709_ ? (full_range_ ? AMF_VIDEO_CONVERTER_COLOR_PROFILE_FULL_709
                                 : AMF_VIDEO_CONVERTER_COLOR_PROFILE_709)
                  : (full_range_ ? AMF_VIDEO_CONVERTER_COLOR_PROFILE_FULL_601
                                 : AMF_VIDEO_CONVERTER_COLOR_PROFILE_601));
-      AMF_CHECK_RETURN(res,
-                       "SetProperty AMF_VIDEO_ENCODER_OUTPUT_COLOR_PROFILE");
+      if (res != AMF_OK) {
+        // Log warning but don't fail - this property is optional
+        LOG_DEBUG(std::string("SetProperty AMF_VIDEO_ENCODER_OUTPUT_COLOR_PROFILE failed (not supported), continuing"));
+      }
       // https://github.com/obsproject/obs-studio/blob/e27b013d4754e0e81119ab237ffedce8fcebcbbf/plugins/obs-ffmpeg/texture-amf.cpp#L924
+      // OUTPUT_TRANSFER_CHARACTERISTIC may not be supported on all drivers - make it optional
       res = AMFEncoder_->SetProperty<amf_int64>(
           AMF_VIDEO_ENCODER_OUTPUT_TRANSFER_CHARACTERISTIC,
           bt709_ ? AMF_COLOR_TRANSFER_CHARACTERISTIC_BT709
                  : AMF_COLOR_TRANSFER_CHARACTERISTIC_SMPTE170M);
-      AMF_CHECK_RETURN(
-          res, "SetProperty AMF_VIDEO_ENCODER_OUTPUT_TRANSFER_CHARACTERISTIC");
+      if (res != AMF_OK) {
+        LOG_DEBUG(std::string("SetProperty AMF_VIDEO_ENCODER_OUTPUT_TRANSFER_CHARACTERISTIC failed (not supported), continuing"));
+      }
+      // OUTPUT_COLOR_PRIMARIES may not be supported on all drivers - make it optional
       res = AMFEncoder_->SetProperty<amf_int64>(
           AMF_VIDEO_ENCODER_OUTPUT_COLOR_PRIMARIES,
           bt709_ ? AMF_COLOR_PRIMARIES_BT709 : AMF_COLOR_PRIMARIES_SMPTE170M);
-      AMF_CHECK_RETURN(res,
-                       "SetProperty AMF_VIDEO_ENCODER_OUTPUT_COLOR_PRIMARIES");
+      if (res != AMF_OK) {
+        LOG_DEBUG(std::string("SetProperty AMF_VIDEO_ENCODER_OUTPUT_COLOR_PRIMARIES failed (not supported), continuing"));
+      }
 
       // ------------- Encoder params dynamic ---------------
       AMFEncoder_->SetProperty(AMF_VIDEO_ENCODER_B_PIC_PATTERN, 0);
@@ -320,10 +381,12 @@ private:
 
     } else if (codecStr == amf_wstring(AMFVideoEncoder_HEVC)) {
       // ------------- Encoder params usage---------------
+      // Use LOW_LATENCY instead of LOW_LATENCY_HIGH_QUALITY to avoid assertion failures
+      // on drivers that don't support usage value 5
       res = AMFEncoder_->SetProperty(
           AMF_VIDEO_ENCODER_HEVC_USAGE,
-          AMF_VIDEO_ENCODER_HEVC_USAGE_LOW_LATENCY_HIGH_QUALITY);
-      AMF_CHECK_RETURN(res, "SetProperty AMF_VIDEO_ENCODER_HEVC_USAGE failed");
+          AMF_VIDEO_ENCODER_HEVC_USAGE_LOW_LATENCY);
+      // Don't fail if usage setting fails - some drivers may not support all usage values
 
       // ------------- Encoder params static---------------
       res = AMFEncoder_->SetProperty(
@@ -343,10 +406,12 @@ private:
       AMF_CHECK_RETURN(
           res, "SetProperty AMF_VIDEO_ENCODER_HEVC_QUALITY_PRESET failed");
 
-      res = AMFEncoder_->SetProperty(AMF_VIDEO_ENCODER_HEVC_COLOR_BIT_DEPTH,
-                                     eDepth_);
-      AMF_CHECK_RETURN(
-          res, "SetProperty AMF_VIDEO_ENCODER_HEVC_COLOR_BIT_DEPTH failed");
+      // COLOR_BIT_DEPTH may not be supported on all drivers - make it optional
+      res = AMFEncoder_->SetProperty(AMF_VIDEO_ENCODER_HEVC_COLOR_BIT_DEPTH, eDepth_);
+      if (res != AMF_OK) {
+        // Log warning but don't fail - this property is optional
+        LOG_DEBUG(std::string("SetProperty AMF_VIDEO_ENCODER_HEVC_COLOR_BIT_DEPTH failed (not supported), continuing"));
+      }
 
       res = AMFEncoder_->SetProperty(
           AMF_VIDEO_ENCODER_HEVC_RATE_CONTROL_METHOD,
@@ -365,34 +430,41 @@ private:
             res, "SetProperty AMF_VIDEO_ENCODER_HEVC_PROFILE_LEVEL failed");
       }
       // color
+      // NOMINAL_RANGE may not be supported on all drivers - make it optional
       res = AMFEncoder_->SetProperty<amf_int64>(
           AMF_VIDEO_ENCODER_HEVC_NOMINAL_RANGE,
           full_range_ ? AMF_VIDEO_ENCODER_HEVC_NOMINAL_RANGE_FULL
                       : AMF_VIDEO_ENCODER_HEVC_NOMINAL_RANGE_STUDIO);
-      AMF_CHECK_RETURN(
-          res, "SetProperty AMF_VIDEO_ENCODER_HEVC_NOMINAL_RANGE failed");
+      if (res != AMF_OK) {
+        // Log warning but don't fail - this property is optional
+        LOG_DEBUG(std::string("SetProperty AMF_VIDEO_ENCODER_HEVC_NOMINAL_RANGE failed (not supported), continuing"));
+      }
+      // OUTPUT_COLOR_PROFILE may not be supported on all drivers - make it optional
       res = AMFEncoder_->SetProperty<amf_int64>(
           AMF_VIDEO_ENCODER_HEVC_OUTPUT_COLOR_PROFILE,
           bt709_ ? (full_range_ ? AMF_VIDEO_CONVERTER_COLOR_PROFILE_FULL_709
                                 : AMF_VIDEO_CONVERTER_COLOR_PROFILE_709)
                  : (full_range_ ? AMF_VIDEO_CONVERTER_COLOR_PROFILE_FULL_601
                                 : AMF_VIDEO_CONVERTER_COLOR_PROFILE_601));
-      AMF_CHECK_RETURN(
-          res,
-          "SetProperty AMF_VIDEO_ENCODER_HEVC_OUTPUT_COLOR_PROFILE failed");
+      if (res != AMF_OK) {
+        // Log warning but don't fail - this property is optional
+        LOG_DEBUG(std::string("SetProperty AMF_VIDEO_ENCODER_HEVC_OUTPUT_COLOR_PROFILE failed (not supported), continuing"));
+      }
+      // OUTPUT_TRANSFER_CHARACTERISTIC may not be supported on all drivers - make it optional
       res = AMFEncoder_->SetProperty<amf_int64>(
           AMF_VIDEO_ENCODER_HEVC_OUTPUT_TRANSFER_CHARACTERISTIC,
           bt709_ ? AMF_COLOR_TRANSFER_CHARACTERISTIC_BT709
                  : AMF_COLOR_TRANSFER_CHARACTERISTIC_SMPTE170M);
-      AMF_CHECK_RETURN(
-          res, "SetProperty "
-               "AMF_VIDEO_ENCODER_HEVC_OUTPUT_TRANSFER_CHARACTERISTIC failed");
+      if (res != AMF_OK) {
+        LOG_DEBUG(std::string("SetProperty AMF_VIDEO_ENCODER_HEVC_OUTPUT_TRANSFER_CHARACTERISTIC failed (not supported), continuing"));
+      }
+      // OUTPUT_COLOR_PRIMARIES may not be supported on all drivers - make it optional
       res = AMFEncoder_->SetProperty<amf_int64>(
           AMF_VIDEO_ENCODER_HEVC_OUTPUT_COLOR_PRIMARIES,
           bt709_ ? AMF_COLOR_PRIMARIES_BT709 : AMF_COLOR_PRIMARIES_SMPTE170M);
-      AMF_CHECK_RETURN(
-          res,
-          "SetProperty AMF_VIDEO_ENCODER_HEVC_OUTPUT_COLOR_PRIMARIES failed");
+      if (res != AMF_OK) {
+        LOG_DEBUG(std::string("SetProperty AMF_VIDEO_ENCODER_HEVC_OUTPUT_COLOR_PRIMARIES failed (not supported), continuing"));
+      }
 
       // ------------- Encoder params dynamic ---------------
       res = AMFEncoder_->SetProperty(AMF_VIDEO_ENCODER_HEVC_QUERY_TIMEOUT,
@@ -472,6 +544,7 @@ int amf_destroy_encoder(void *encoder) {
 void *amf_new_encoder(void *handle, int64_t luid,
                       DataFormat dataFormat, int32_t width, int32_t height,
                       int32_t kbs, int32_t framerate, int32_t gop) {
+  (void)luid;
   AMFEncoder *enc = NULL;
   try {
     amf_wstring codecStr;
@@ -519,7 +592,7 @@ int amf_driver_support() {
       factory.Terminate();
       return 0;
     }
-  } catch (const std::exception &e) {
+  } catch (const std::exception &) {
   }
   return -1;
 }
@@ -539,19 +612,36 @@ int amf_test_encode(int64_t *outLuids, int32_t *outVendors, int32_t maxDescNum, 
         continue;
       }
       
-      AMFEncoder *e = (AMFEncoder *)amf_new_encoder(
-          (void *)adapter.get()->device_.Get(), currentLuid,
-          dataFormat, width, height, kbs, framerate, gop);
-      if (!e)
-        continue;
-      if (e->test() == AMF_OK) {
-        outLuids[count] = currentLuid;
-        outVendors[count] = VENDOR_AMD;
-        count += 1;
+      AMFEncoder *e = nullptr;
+      try {
+        e = (AMFEncoder *)amf_new_encoder(
+            (void *)adapter.get()->device_.Get(), currentLuid,
+            dataFormat, width, height, kbs, framerate, gop);
+        if (!e)
+          continue;
+        
+        AMF_RESULT test_res = e->test();
+        if (test_res == AMF_OK) {
+          outLuids[count] = currentLuid;
+          outVendors[count] = VENDOR_AMD;
+          count += 1;
+        }
+      } catch (const std::exception &ex) {
+        LOG_ERROR(std::string("AMF encoder test exception: ") + ex.what());
+      } catch (...) {
+        LOG_ERROR(std::string("AMF encoder test unknown exception"));
       }
-      e->destroy();
-      delete e;
-      e = nullptr;
+      
+      if (e) {
+        try {
+          e->destroy();
+          delete e;
+        } catch (...) {
+          // Ignore cleanup errors
+        }
+        e = nullptr;
+      }
+      
       if (count >= maxDescNum)
         break;
     }
@@ -560,6 +650,8 @@ int amf_test_encode(int64_t *outLuids, int32_t *outVendors, int32_t maxDescNum, 
 
   } catch (const std::exception &e) {
     LOG_ERROR(std::string("test ") + std::to_string(kbs) + " failed: " + e.what());
+  } catch (...) {
+    LOG_ERROR(std::string("test unknown exception"));
   }
   return -1;
 }

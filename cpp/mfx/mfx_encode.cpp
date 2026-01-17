@@ -1,6 +1,5 @@
 #include <cstring>
 #include <iostream>
-#include <libavutil/pixfmt.h>
 #include <limits>
 #include <sample_defs.h>
 #include <sample_utils.h>
@@ -27,7 +26,7 @@
 
 namespace {
 
-mfxStatus MFX_CDECL simple_getHDL(mfxHDL pthis, mfxMemId mid, mfxHDL *handle) {
+mfxStatus MFX_CDECL simple_getHDL(mfxHDL, mfxMemId mid, mfxHDL *handle) {
   mfxHDLPair *pair = (mfxHDLPair *)handle;
   pair->first = mid;
   pair->second = (mfxHDL)(UINT)0;
@@ -125,8 +124,6 @@ public:
 
   int encode(ID3D11Texture2D *tex, EncodeCallback callback, void *obj,
              int64_t ms) {
-    mfxStatus sts = MFX_ERR_NONE;
-
     int nEncSurfIdx =
         GetFreeSurfaceIndex(encSurfaces_.data(), encSurfaces_.size());
     if (nEncSurfIdx >= encSurfaces_.size()) {

@@ -15,10 +15,13 @@ fn main() {
     let mut builder = Build::new();
 
     build_common(&mut builder);
-    ffmpeg::build_ffmpeg(&mut builder);
-    #[cfg(all(windows, feature = "vram"))]
+    #[cfg(windows)]
     sdk::build_sdk(&mut builder);
-    builder.static_crt(true).compile("hwcodec");
+    builder
+        .static_crt(true)
+        .flag("/EHsc")
+        .define("_CRT_SECURE_NO_WARNINGS", None)
+        .compile("hwcodec");
 }
 
 fn build_common(builder: &mut Build) {
@@ -38,7 +41,9 @@ fn build_common(builder: &mut Build) {
     // system
     #[cfg(windows)]
     {
-        ["d3d11", "dxgi"].map(|lib| println!("cargo:rustc-link-lib={}", lib));
+        for lib in ["d3d11", "dxgi"] {
+            println!("cargo:rustc-link-lib={}", lib);
+        }
     }
 
     builder.include(&common_dir);
@@ -92,192 +97,7 @@ impl bindgen::callbacks::ParseCallbacks for CommonCallbacks {
     }
 }
 
-mod ffmpeg {
-    #[allow(unused_imports)]
-    use core::panic;
-
-    use super::*;
-
-    pub fn build_ffmpeg(builder: &mut Build) {
-        ffmpeg_ffi();
-        link_vcpkg(builder, std::env::var("VCPKG_ROOT").unwrap().into());
-        link_os();
-        build_ffmpeg_ram(builder);
-        #[cfg(feature = "vram")]
-        build_ffmpeg_vram(builder);
-        build_mux(builder);
-        let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap();
-        if target_os == "macos" || target_os == "ios" {
-            builder.flag("-std=c++11");
-        }
-    }
-
-    fn link_vcpkg(builder: &mut Build, mut path: PathBuf) -> PathBuf {
-        let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap();
-        let mut target_arch = std::env::var("CARGO_CFG_TARGET_ARCH").unwrap();
-        if target_arch == "x86_64" {
-            target_arch = "x64".to_owned();
-        } else if target_arch == "x86" {
-            target_arch = "x86".to_owned();
-        } else if target_arch == "loongarch64" {
-            target_arch = "loongarch64".to_owned();
-        } else if target_arch == "aarch64" {
-            target_arch = "arm64".to_owned();
-        } else {
-            target_arch = "arm".to_owned();
-        }
-        let mut target = if target_os == "macos" {
-            if target_arch == "x64" {
-                "x64-osx".to_owned()
-            } else if target_arch == "arm64" {
-                "arm64-osx".to_owned()
-            } else {
-                format!("{}-{}", target_arch, target_os)
-            }
-        } else if target_os == "windows" {
-            "x64-windows-static".to_owned()
-        } else {
-            format!("{}-{}", target_arch, target_os)
-        };
-        if target_arch == "x86" {
-            target = target.replace("x64", "x86");
-        }
-        println!("cargo:info={}", target);
-        path.push("installed");
-        path.push(target);
-
-        println!(
-            "{}",
-            format!(
-                "cargo:rustc-link-search=native={}",
-                path.join("lib").to_str().unwrap()
-            )
-        );
-        {
-            let mut static_libs = vec!["avcodec", "avutil", "avformat"];
-            if target_os == "windows" {
-                static_libs.push("libmfx");
-            }
-            static_libs
-                .iter()
-                .map(|lib| println!("cargo:rustc-link-lib=static={}", lib))
-                .count();
-        }
-
-        let include = path.join("include");
-        println!("{}", format!("cargo:include={}", include.to_str().unwrap()));
-        builder.include(&include);
-        include
-    }
-
-    fn link_os() {
-        let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap();
-        let target_arch = std::env::var("CARGO_CFG_TARGET_ARCH").unwrap();
-        let dyn_libs: Vec<&str> = if target_os == "windows" {
-            ["User32", "bcrypt", "ole32", "advapi32"].to_vec()
-        } else if target_os == "linux" {
-            let mut v = ["drm", "X11", "stdc++"].to_vec();
-            if target_arch == "x86_64" {
-                v.push("z");
-            }
-            v
-        } else if target_os == "macos" || target_os == "ios" {
-            ["c++", "m"].to_vec()
-        } else if target_os == "android" {
-            // https://github.com/FFmpeg/FFmpeg/commit/98b5e80fd6980e641199e9ce3bc27100e2df17a4
-            // link to mediandk directly since n7.1
-            ["z", "m", "android", "atomic", "mediandk"].to_vec()
-        } else {
-            panic!("unsupported os");
-        };
-        dyn_libs
-            .iter()
-            .map(|lib| println!("cargo:rustc-link-lib={}", lib))
-            .count();
-
-        if target_os == "macos" || target_os == "ios" {
-            println!("cargo:rustc-link-lib=framework=CoreFoundation");
-            println!("cargo:rustc-link-lib=framework=CoreVideo");
-            println!("cargo:rustc-link-lib=framework=CoreMedia");
-            println!("cargo:rustc-link-lib=framework=VideoToolbox");
-            println!("cargo:rustc-link-lib=framework=AVFoundation");
-        }
-    }
-
-    fn ffmpeg_ffi() {
-        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let ffmpeg_ram_dir = manifest_dir.join("cpp").join("common");
-        let ffi_header = ffmpeg_ram_dir
-            .join("ffmpeg_ffi.h")
-            .to_string_lossy()
-            .to_string();
-        bindgen::builder()
-            .header(ffi_header)
-            .rustified_enum("*")
-            .generate()
-            .unwrap()
-            .write_to_file(Path::new(&env::var_os("OUT_DIR").unwrap()).join("ffmpeg_ffi.rs"))
-            .unwrap();
-    }
-
-    fn build_ffmpeg_ram(builder: &mut Build) {
-        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let ffmpeg_ram_dir = manifest_dir.join("cpp").join("ffmpeg_ram");
-        let ffi_header = ffmpeg_ram_dir
-            .join("ffmpeg_ram_ffi.h")
-            .to_string_lossy()
-            .to_string();
-        bindgen::builder()
-            .header(ffi_header)
-            .rustified_enum("*")
-            .generate()
-            .unwrap()
-            .write_to_file(Path::new(&env::var_os("OUT_DIR").unwrap()).join("ffmpeg_ram_ffi.rs"))
-            .unwrap();
-
-        builder.files(
-            ["ffmpeg_ram_encode.cpp", "ffmpeg_ram_decode.cpp"].map(|f| ffmpeg_ram_dir.join(f)),
-        );
-    }
-
-    #[cfg(feature = "vram")]
-    fn build_ffmpeg_vram(builder: &mut Build) {
-        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let ffmpeg_ram_dir = manifest_dir.join("cpp").join("ffmpeg_vram");
-        let ffi_header = ffmpeg_ram_dir
-            .join("ffmpeg_vram_ffi.h")
-            .to_string_lossy()
-            .to_string();
-        bindgen::builder()
-            .header(ffi_header)
-            .rustified_enum("*")
-            .generate()
-            .unwrap()
-            .write_to_file(Path::new(&env::var_os("OUT_DIR").unwrap()).join("ffmpeg_vram_ffi.rs"))
-            .unwrap();
-
-        builder.files(
-            ["ffmpeg_vram_decode.cpp", "ffmpeg_vram_encode.cpp"].map(|f| ffmpeg_ram_dir.join(f)),
-        );
-    }
-
-    fn build_mux(builder: &mut Build) {
-        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let mux_dir = manifest_dir.join("cpp").join("mux");
-        let mux_header = mux_dir.join("mux_ffi.h").to_string_lossy().to_string();
-        bindgen::builder()
-            .header(mux_header)
-            .rustified_enum("*")
-            .generate()
-            .unwrap()
-            .write_to_file(Path::new(&env::var_os("OUT_DIR").unwrap()).join("mux_ffi.rs"))
-            .unwrap();
-
-        builder.files(["mux.cpp"].map(|f| mux_dir.join(f)));
-    }
-}
-
-#[cfg(all(windows, feature = "vram"))]
+#[cfg(windows)]
 mod sdk {
     use super::*;
 
@@ -305,11 +125,14 @@ mod sdk {
 
         // system
         #[cfg(target_os = "windows")]
-        [
-            "kernel32", "user32", "gdi32", "winspool", "shell32", "ole32", "oleaut32", "uuid",
-            "comdlg32", "advapi32", "d3d11", "dxgi",
-        ]
-        .map(|lib| println!("cargo:rustc-link-lib={}", lib));
+        {
+            for lib in [
+                "kernel32", "user32", "gdi32", "winspool", "shell32", "ole32", "oleaut32", "uuid",
+                "comdlg32", "advapi32", "d3d11", "dxgi",
+            ] {
+                println!("cargo:rustc-link-lib={}", lib);
+            }
+        }
         #[cfg(target_os = "linux")]
         println!("cargo:rustc-link-lib=stdc++");
 
@@ -415,8 +238,25 @@ mod sdk {
 
         // mfx_dispatch
         let mfx_path = sdk_path.join("api").join("mfx_dispatch");
-        // include headers and reuse static lib
+        let mfx_dispatch_src = mfx_path.join("windows").join("src");
+        // include headers and compile source files
         builder.include(mfx_path.join("windows").join("include"));
+        
+        // compile mfx_dispatch source files
+        builder.files([
+            "mfx_dispatcher.cpp",
+            "mfx_dispatcher_main.cpp",
+            "mfx_function_table.cpp",
+            "mfx_library_iterator.cpp",
+            "mfx_load_dll.cpp",
+            "mfx_load_plugin.cpp",
+            "mfx_plugin_hive.cpp",
+            "mfx_win_reg_key.cpp",
+            "mfx_driver_store_loader.cpp",
+            "mfx_dxva2_device.cpp",
+            "mfx_dispatcher_log.cpp",
+            "mfx_critical_section.cpp",
+        ].map(|f| mfx_dispatch_src.join(f)));
 
         let sample_path = sdk_path.join("samples").join("sample_common");
         builder
@@ -446,11 +286,14 @@ mod sdk {
             );
 
         // link
-        [
-            "kernel32", "user32", "gdi32", "winspool", "shell32", "ole32", "oleaut32", "uuid",
-            "comdlg32", "advapi32", "d3d11", "dxgi",
-        ]
-        .map(|lib| println!("cargo:rustc-link-lib={}", lib));
+        {
+            for lib in [
+                "kernel32", "user32", "gdi32", "winspool", "shell32", "ole32", "oleaut32", "uuid",
+                "comdlg32", "advapi32", "d3d11", "dxgi",
+            ] {
+                println!("cargo:rustc-link-lib={}", lib);
+            }
+        }
 
         builder
             .files(["mfx_encode.cpp", "mfx_decode.cpp"].map(|f| mfx_dir.join(f)))

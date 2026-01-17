@@ -44,8 +44,6 @@ bool NativeDevice::Init(int64_t luid, ID3D11Device *device, int pool_size) {
 }
 
 bool NativeDevice::InitFromLuid(int64_t luid) {
-  HRESULT hr = S_OK;
-
   HRB(CreateDXGIFactory1(IID_IDXGIFactory1,
                          (void **)factory1_.ReleaseAndGetAddressOf()));
 
@@ -204,12 +202,14 @@ bool NativeDevice::nv12_to_bgra_set_srv(ID3D11Texture2D *nv12Texture, int width,
   // set SRV
   std::array<ID3D11ShaderResourceView *, 2> const textureViews = {
       SRV_[0].Get(), SRV_[1].Get()};
-  context_->PSSetShaderResources(0, textureViews.size(), textureViews.data());
+  context_->PSSetShaderResources(0, static_cast<UINT>(textureViews.size()), textureViews.data());
   return true;
 }
 
 bool NativeDevice::nv12_to_bgra_set_rtv(ID3D11Texture2D *bgraTexture, int width,
                                         int height) {
+  (void)width;
+  (void)height;
   RTV_.Reset();
 
   D3D11_RENDER_TARGET_VIEW_DESC rtDesc;
@@ -270,7 +270,7 @@ bool NativeDevice::nv12_to_bgra_set_shader() {
        D3D11_INPUT_PER_VERTEX_DATA, 0},
   }};
   ComPtr<ID3D11InputLayout> inputLayout = NULL;
-  HRB(device_->CreateInputLayout(Layout.data(), Layout.size(), g_VS,
+  HRB(device_->CreateInputLayout(Layout.data(), static_cast<UINT>(Layout.size()), g_VS,
                                  ARRAYSIZE(g_VS), inputLayout.GetAddressOf()));
   context_->IASetInputLayout(inputLayout.Get());
 
@@ -485,14 +485,14 @@ bool NativeDevice::BgraToNv12(ID3D11Texture2D *bgraTexture,
   D3D11_TEXTURE2D_DESC nv12Desc = {0};
   bgraTexture->GetDesc(&bgraDesc);
   nv12Texture->GetDesc(&nv12Desc);
-  if (bgraDesc.Width < width || bgraDesc.Height < height) {
+  if (bgraDesc.Width < static_cast<UINT>(width) || bgraDesc.Height < static_cast<UINT>(height)) {
     LOG_ERROR(std::string("bgraTexture size is smaller than width and height, ") +
               std::to_string(bgraDesc.Width) + "x" +
               std::to_string(bgraDesc.Height) + " < " + std::to_string(width) +
               "x" + std::to_string(height));
     return false;
   }
-  if (nv12Desc.Width < width || nv12Desc.Height < height) {
+  if (nv12Desc.Width < static_cast<UINT>(width) || nv12Desc.Height < static_cast<UINT>(height)) {
     LOG_ERROR(std::string("nv12Texture size is smaller than width and height,") +
               std::to_string(nv12Desc.Width) + "x" +
               std::to_string(nv12Desc.Height) + " < " + std::to_string(width) +
@@ -708,8 +708,11 @@ int Adapters::GetFirstAdapterIndex(AdapterVendor vendor) {
 uint64_t GetHwcodecGpuSignature() {
   uint64_t signature = 0;
   ComPtr<IDXGIFactory1> factory1 = nullptr;
-  HRI(CreateDXGIFactory1(IID_IDXGIFactory1,
-                         (void **)factory1.ReleaseAndGetAddressOf()));
+  HRESULT hr = CreateDXGIFactory1(IID_IDXGIFactory1,
+                                  (void **)factory1.ReleaseAndGetAddressOf());
+  if (FAILED(hr)) {
+    return 0;
+  }
 
   ComPtr<IDXGIAdapter1> tmpAdapter = nullptr;
   UINT i = 0;

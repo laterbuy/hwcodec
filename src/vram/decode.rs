@@ -1,7 +1,6 @@
 use crate::{
     common::{DataFormat::*, Driver::*},
-    ffmpeg::init_av_log,
-    vram::{amf, ffmpeg, inner::DecodeCalls, mfx, nv, DecodeContext},
+    vram::{amf, inner::DecodeCalls, mfx, nv, DecodeContext},
 };
 use log::trace;
 use std::ffi::c_void;
@@ -26,12 +25,10 @@ extern "C" {
 
 impl Decoder {
     pub fn new(ctx: DecodeContext) -> Result<Self, ()> {
-        init_av_log();
         let calls = match ctx.driver {
             NV => nv::decode_calls(),
             AMF => amf::decode_calls(),
             MFX => mfx::decode_calls(),
-            FFMPEG => ffmpeg::decode_calls(),
         };
         unsafe {
             let codec = (calls.new)(
@@ -114,12 +111,6 @@ pub fn available() -> Vec<DecodeContext> {
     //         .collect(),
     // );
     codecs.append(
-        &mut ffmpeg::possible_support_decoders()
-            .drain(..)
-            .map(|n| (FFMPEG, n))
-            .collect(),
-    );
-    codecs.append(
         &mut amf::possible_support_decoders()
             .drain(..)
             .map(|n| (AMF, n))
@@ -158,7 +149,6 @@ pub fn available() -> Vec<DecodeContext> {
             NV => nv::decode_calls().test,
             AMF => amf::decode_calls().test,
             MFX => mfx::decode_calls().test,
-            FFMPEG => ffmpeg::decode_calls().test,
         };
 
         let mut luids: Vec<i64> = vec![0; crate::vram::MAX_ADATERS];

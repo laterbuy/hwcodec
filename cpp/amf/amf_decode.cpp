@@ -134,7 +134,7 @@ public:
         break;
       } break;
       case amf::AMF_MEMORY_OPENCL: {
-        uint8_t *buf = (uint8_t *)native;
+        (void)native;
       } break;
       }
 
@@ -226,17 +226,25 @@ private:
                                  amf_int64(AMF_VIDEO_DECODER_MODE_LOW_LATENCY));
     AMF_CHECK_RETURN(res, "SetProperty AMF_VIDEO_DECODER_REORDER_MODE failed");
     // color
+    // COLOR_RANGE may not be supported on all drivers - make it optional
     res = AMFDecoder_->SetProperty<amf_int64>(
         AMF_VIDEO_DECODER_COLOR_RANGE,
         full_range_ ? AMF_COLOR_RANGE_FULL : AMF_COLOR_RANGE_STUDIO);
-    AMF_CHECK_RETURN(res, "SetProperty AMF_VIDEO_DECODER_COLOR_RANGE failed");
+    if (res != AMF_OK) {
+      // Log warning but don't fail - this property is optional
+      LOG_DEBUG(std::string("SetProperty AMF_VIDEO_DECODER_COLOR_RANGE failed (not supported), continuing"));
+    }
+    // COLOR_PROFILE may not be supported on all drivers - make it optional
     res = AMFDecoder_->SetProperty<amf_int64>(
         AMF_VIDEO_DECODER_COLOR_PROFILE,
         bt709_ ? (full_range_ ? AMF_VIDEO_CONVERTER_COLOR_PROFILE_FULL_709
                               : AMF_VIDEO_CONVERTER_COLOR_PROFILE_709)
                : (full_range_ ? AMF_VIDEO_CONVERTER_COLOR_PROFILE_FULL_601
                               : AMF_VIDEO_CONVERTER_COLOR_PROFILE_601));
-    AMF_CHECK_RETURN(res, "SetProperty AMF_VIDEO_DECODER_COLOR_PROFILE failed");
+    if (res != AMF_OK) {
+      // Log warning but don't fail - this property is optional
+      LOG_DEBUG(std::string("SetProperty AMF_VIDEO_DECODER_COLOR_PROFILE failed (not supported), continuing"));
+    }
     // res = AMFDecoder_->SetProperty<amf_int64>(
     //     AMF_VIDEO_DECODER_COLOR_TRANSFER_CHARACTERISTIC,
     //     bt709_ ? AMF_COLOR_TRANSFER_CHARACTERISTIC_BT709
@@ -289,35 +297,44 @@ private:
       res = AMFConverter_->Init(decodeFormatOut_, width, height);
       AMF_CHECK_RETURN(res, "Init converter failed");
       // color
+      // INPUT_COLOR_RANGE may not be supported on all drivers - make it optional
       res = AMFConverter_->SetProperty<amf_int64>(
           AMF_VIDEO_CONVERTER_INPUT_COLOR_RANGE,
           full_range_ ? AMF_COLOR_RANGE_FULL : AMF_COLOR_RANGE_STUDIO);
-      AMF_CHECK_RETURN(
-          res, "SetProperty AMF_VIDEO_CONVERTER_INPUT_COLOR_RANGE failed");
+      if (res != AMF_OK) {
+        LOG_DEBUG(std::string("SetProperty AMF_VIDEO_CONVERTER_INPUT_COLOR_RANGE failed (not supported), continuing"));
+      }
+      // OUTPUT_COLOR_RANGE may not be supported on all drivers - make it optional
       res = AMFConverter_->SetProperty<amf_int64>(
           AMF_VIDEO_CONVERTER_OUTPUT_COLOR_RANGE, AMF_COLOR_RANGE_FULL);
-      AMF_CHECK_RETURN(
-          res, "SetProperty AMF_VIDEO_CONVERTER_OUTPUT_COLOR_RANGE failed");
+      if (res != AMF_OK) {
+        LOG_DEBUG(std::string("SetProperty AMF_VIDEO_CONVERTER_OUTPUT_COLOR_RANGE failed (not supported), continuing"));
+      }
+      // COLOR_PROFILE may not be supported on all drivers - make it optional
       res = AMFConverter_->SetProperty<amf_int64>(
           AMF_VIDEO_CONVERTER_COLOR_PROFILE,
           bt709_ ? (full_range_ ? AMF_VIDEO_CONVERTER_COLOR_PROFILE_FULL_709
                                 : AMF_VIDEO_CONVERTER_COLOR_PROFILE_709)
                  : (full_range_ ? AMF_VIDEO_CONVERTER_COLOR_PROFILE_FULL_601
                                 : AMF_VIDEO_CONVERTER_COLOR_PROFILE_601));
-      AMF_CHECK_RETURN(res,
-                       "SetProperty AMF_VIDEO_CONVERTER_COLOR_PROFILE failed");
+      if (res != AMF_OK) {
+        LOG_DEBUG(std::string("SetProperty AMF_VIDEO_CONVERTER_COLOR_PROFILE failed (not supported), continuing"));
+      }
+      // INPUT_TRANSFER_CHARACTERISTIC may not be supported on all drivers - make it optional
       res = AMFConverter_->SetProperty<amf_int64>(
           AMF_VIDEO_CONVERTER_INPUT_TRANSFER_CHARACTERISTIC,
           bt709_ ? AMF_COLOR_TRANSFER_CHARACTERISTIC_BT709
                  : AMF_COLOR_TRANSFER_CHARACTERISTIC_SMPTE170M);
-      AMF_CHECK_RETURN(
-          res, "SetProperty AMF_VIDEO_CONVERTER_INPUT_TRANSFER_CHARACTERISTIC "
-               "failed");
+      if (res != AMF_OK) {
+        LOG_DEBUG(std::string("SetProperty AMF_VIDEO_CONVERTER_INPUT_TRANSFER_CHARACTERISTIC failed (not supported), continuing"));
+      }
+      // INPUT_COLOR_PRIMARIES may not be supported on all drivers - make it optional
       res = AMFConverter_->SetProperty<amf_int64>(
           AMF_VIDEO_CONVERTER_INPUT_COLOR_PRIMARIES,
           bt709_ ? AMF_COLOR_PRIMARIES_BT709 : AMF_COLOR_PRIMARIES_SMPTE170M);
-      AMF_CHECK_RETURN(
-          res, "SetProperty AMF_VIDEO_CONVERTER_INPUT_COLOR_PRIMARIES failed");
+      if (res != AMF_OK) {
+        LOG_DEBUG(std::string("SetProperty AMF_VIDEO_CONVERTER_INPUT_COLOR_PRIMARIES failed (not supported), continuing"));
+      }
     }
     last_width_ = width;
     last_height_ = height;
@@ -371,7 +388,6 @@ void *amf_new_decoder(void *device, int64_t luid,
   try {
     amf_wstring codecStr;
     amf::AMF_MEMORY_TYPE memory;
-    amf::AMF_SURFACE_FORMAT surfaceFormat;
     if (!convert_api(memory)) {
       return NULL;
     }
