@@ -1,6 +1,27 @@
 #ifndef WIN_H
 #define WIN_H
 
+// ============================================================================
+// WARNING: This header file is DEPRECATED
+// ============================================================================
+// 
+// All Windows platform implementations have been replaced with Rust:
+//   - NativeDevice, Adapter, Adapters classes → Rust (src/platform/win/)
+//   - win.cpp, bmp.cpp, dump.cpp → Rust implementations
+//   - All functions exported via FFI (see win_rust_ffi.h)
+//
+// IMPORTANT: 
+//   - C++ code should use "platform/win/win_rust_ffi.h" instead of this file
+//   - This file is kept only for:
+//     1. LUID macro definition (used by some C++ code)
+//     2. Backward compatibility during migration
+//   - The class definitions below are NO LONGER USED - implementations are in Rust
+//   - win.cpp, bmp.cpp, dump.cpp are NO LONGER COMPILED (see build.rs)
+//
+// To use Rust implementations:
+//   #include "platform/win/win_rust_ffi.h"  // Use FFI functions directly
+//   // Or use win_rust_wrapper.h for C++ wrapper classes (if needed)
+
 #include <DirectXMath.h>
 #include <d3d11.h>
 #include <d3d11_1.h>

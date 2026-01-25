@@ -8,6 +8,7 @@
 #include "common.h"
 #include "system.h"
 #include "util.h"
+#include "platform/win/win_rust_ffi.h"
 
 #define LOG_MODULE "MFXENC"
 #include "log.h"
@@ -50,7 +51,7 @@ mfxStatus InitSession(MFXVideoSession &session) {
 
 class VplEncoder {
 public:
-  std::unique_ptr<NativeDevice> native_ = nullptr;
+  NativeDeviceHandle native_ = nullptr;
   MFXVideoSession session_;
   MFXVideoENCODE *mfxENC_ = nullptr;
   std::vector<mfxFrameSurface1> encSurfaces_;
@@ -99,14 +100,19 @@ public:
     gop_ = gop;
   }
 
-  ~VplEncoder() {}
+  ~VplEncoder() {
+    if (native_) {
+      hwcodec_native_device_destroy(native_);
+      native_ = nullptr;
+    }
+  }
 
   mfxStatus Reset() {
     mfxStatus sts = MFX_ERR_NONE;
 
     if (!native_) {
-      native_ = std::make_unique<NativeDevice>();
-      if (!native_->Init(luid_, (ID3D11Device *)handle_)) {
+      native_ = hwcodec_native_device_new(luid_, (ID3D11Device *)handle_, 1);
+      if (!native_) {
         LOG_ERROR(std::string("failed to init native device"));
         return MFX_ERR_DEVICE_FAILED;
       }
@@ -157,15 +163,16 @@ public:
       }
     }
     if (!nv12Texture_) {
+      ID3D11Device* device = (ID3D11Device*)hwcodec_native_device_get_device(native_);
       D3D11_TEXTURE2D_DESC desc;
       ZeroMemory(&desc, sizeof(desc));
       tex->GetDesc(&desc);
       desc.Format = DXGI_FORMAT_NV12;
       desc.MiscFlags = 0;
-      HRI(native_->device_->CreateTexture2D(
+      HRI(device->CreateTexture2D(
           &desc, NULL, nv12Texture_.ReleaseAndGetAddressOf()));
     }
-    if (!native_->BgraToNv12(tex, nv12Texture_.Get(), width_, height_,
+    if (!hwcodec_native_device_bgra_to_nv12(native_, tex, nv12Texture_.Get(), width_, height_,
                              colorSpace_in, colorSpace_out)) {
       LOG_ERROR(std::string("failed to convert to NV12"));
       return -1;
@@ -202,7 +209,8 @@ private:
 
     sts = InitSession(session_);
     CHECK_STATUS(sts, "InitSession");
-    sts = session_.SetHandle(MFX_HANDLE_D3D11_DEVICE, native_->device_.Get());
+    ID3D11Device* device = (ID3D11Device*)hwcodec_native_device_get_device(native_);
+    sts = session_.SetHandle(MFX_HANDLE_D3D11_DEVICE, device);
     CHECK_STATUS(sts, "SetHandle");
     sts = session_.SetFrameAllocator(&frameAllocator);
     CHECK_STATUS(sts, "SetFrameAllocator");
@@ -628,30 +636,33 @@ int mfx_encode(void *encoder, ID3D11Texture2D *tex, EncodeCallback callback,
 }
 
 int mfx_test_encode(int64_t *outLuids, int32_t *outVendors, int32_t maxDescNum, int32_t *outDescNum,
-                    DataFormat dataFormat, int32_t width,
-                    int32_t height, int32_t kbs, int32_t framerate,
-                    int32_t gop, const int64_t *excludedLuids, const int32_t *excludeFormats, int32_t excludeCount) {
+                   DataFormat dataFormat, int32_t width,
+                   int32_t height, int32_t kbs, int32_t framerate,
+                   int32_t gop, const int64_t *excludedLuids, const int32_t *excludeFormats, int32_t excludeCount) {
   try {
-    Adapters adapters;
-    if (!adapters.Init(ADAPTER_VENDOR_INTEL))
+    AdaptersHandle adapters = hwcodec_adapters_new(ADAPTER_VENDOR_INTEL);
+    if (!adapters)
       return -1;
     int count = 0;
-    for (auto &adapter : adapters.adapters_) {
-      int64_t currentLuid = LUID(adapter.get()->desc1_);
+    int adapter_count = hwcodec_adapters_get_count(adapters);
+    for (int i = 0; i < adapter_count; i++) {
+      int64_t currentLuid = hwcodec_adapters_get_adapter_luid(adapters, i);
       if (util::skip_test(excludedLuids, excludeFormats, excludeCount, currentLuid, dataFormat)) {
         continue;
       }
-      
+
+      ID3D11Device* device = (ID3D11Device*)hwcodec_adapters_get_adapter_device(adapters, i);
       VplEncoder *e = (VplEncoder *)mfx_new_encoder(
-          (void *)adapter.get()->device_.Get(), currentLuid,
+          (void *)device, currentLuid,
           dataFormat, width, height, kbs, framerate, gop);
       if (!e)
         continue;
-      if (e->native_->EnsureTexture(e->width_, e->height_)) {
-        e->native_->next();
+      if (hwcodec_native_device_ensure_texture(e->native_, e->width_, e->height_)) {
+        hwcodec_native_device_next(e->native_);
+        ID3D11Texture2D* current_texture = (ID3D11Texture2D*)hwcodec_native_device_get_current_texture(e->native_);
         int32_t key_obj = 0;
         auto start = util::now();
-        bool succ = mfx_encode(e, e->native_->GetCurrentTexture(), util_encode::vram_encode_test_callback, &key_obj,
+        bool succ = mfx_encode(e, current_texture, util_encode::vram_encode_test_callback, &key_obj,
                        0) == 0 && key_obj == 1;
         int64_t elapsed = util::elapsed_ms(start);
         if (succ && elapsed < TEST_TIMEOUT_MS) {
@@ -666,6 +677,7 @@ int mfx_test_encode(int64_t *outLuids, int32_t *outVendors, int32_t maxDescNum, 
       if (count >= maxDescNum)
         break;
     }
+    hwcodec_adapters_destroy(adapters);
     *outDescNum = count;
     return 0;
 

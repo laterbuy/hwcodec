@@ -1,11 +1,15 @@
 @echo off
 REM Compile all C++ files for hwcodec project
 
+REM Get the script directory and project root (one level up)
+set SCRIPT_DIR=%~dp0
+set WORKSPACE=%SCRIPT_DIR%..
+cd /d "%WORKSPACE%"
+
 REM Set up MSVC environment
 call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
 
 REM Set base directories
-set WORKSPACE=D:\workspace\rust\hwcodec
 set COMMON_DIR=%WORKSPACE%\cpp\common
 set WIN_DIR=%COMMON_DIR%\platform\win
 set EXTERNALS_DIR=%WORKSPACE%\externals

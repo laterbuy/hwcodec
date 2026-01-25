@@ -17,9 +17,34 @@
 #include "common.h"
 #include "system.h"
 #include "util.h"
+#include "platform/win/win_rust_ffi.h"
 
 #define LOG_MODULE "AMFENC"
 #include "log.h"
+
+// ============================================================================
+// NOTE: Windows Platform-Specific Code - PARTIALLY REPLACED
+// ============================================================================
+// This file contains Windows-specific AMF SDK calls:
+//   - AMF_MEMORY_DX11: DirectX 11 memory type (Windows only)
+//   - InitDX11(): Initialize AMF with D3D11 device (Windows only)
+//   - CreateSurfaceFromDX11Native(): Create AMF surface from D3D11 texture (Windows only)
+//
+// REPLACEMENT STATUS:
+//   ✅ Windows platform management (device creation, adapter enumeration) → Rust (src/platform/win/)
+//   ✅ Device access → Rust FFI (hwcodec_adapters_get_adapter_device)
+//   ⚠️  AMF SDK API calls → MUST REMAIN IN C++ (AMF SDK is C++ library)
+//
+// WHY AMF SDK CALLS CANNOT BE REPLACED:
+//   1. AMF SDK is a C++ library with C++ interfaces (smart pointers, COM-like)
+//   2. AMF SDK requires direct C++ object manipulation (AMFFactory, AMFContext, etc.)
+//   3. Creating Rust bindings for entire AMF SDK would be extremely complex
+//   4. The C++ code here is minimal - just AMF SDK wrapper calls
+//
+// All Windows platform management (device creation, adapter enumeration) is handled
+// by Rust implementations in src/platform/win/ and exposed via FFI.
+// This file now only contains AMF SDK wrapper code, not Windows platform code.
+// ============================================================================
 
 #define AMF_FACILITY L"AMFEncoder"
 #define MILLISEC_TIME 10000
@@ -112,9 +137,10 @@ public:
 
     switch (AMFMemoryType_) {
     case amf::AMF_MEMORY_DX11:
+      // NOTE: Windows-specific AMF surface creation using DirectX 11
+      // This is the only Windows platform-specific code in this method - required by AMF SDK
       // https://github.com/GPUOpen-LibrariesAndSDKs/AMF/issues/280
-      // AMF will not copy the surface during the CreateSurfaceFromDX11Native
-      // call
+      // AMF will not copy the surface during the CreateSurfaceFromDX11Native call
       res = AMFContext_->CreateSurfaceFromDX11Native(tex, &surface, NULL);
       AMF_CHECK_RETURN(res, "CreateSurfaceFromDX11Native failed");
       {
@@ -251,6 +277,9 @@ public:
 
     switch (AMFMemoryType_) {
     case amf::AMF_MEMORY_DX11:
+      // NOTE: Windows-specific AMF initialization using DirectX 11
+      // The handle_ is an ID3D11Device* obtained from Rust FFI (hwcodec_adapters_get_adapter_device)
+      // This is the only Windows platform-specific code in this file - it's required by AMF SDK
       res = AMFContext_->InitDX11(handle_); // can be DX11 device
       AMF_CHECK_RETURN(res, "InitDX11 failed");
       break;
@@ -602,20 +631,22 @@ int amf_test_encode(int64_t *outLuids, int32_t *outVendors, int32_t maxDescNum, 
                     int32_t height, int32_t kbs, int32_t framerate,
                     int32_t gop, const int64_t *excludedLuids, const int32_t *excludeFormats, int32_t excludeCount) {
   try {
-    Adapters adapters;
-    if (!adapters.Init(ADAPTER_VENDOR_AMD))
+    AdaptersHandle adapters = hwcodec_adapters_new(AdapterVendor::ADAPTER_VENDOR_AMD);
+    if (!adapters)
       return -1;
     int count = 0;
-    for (auto &adapter : adapters.adapters_) {
-      int64_t currentLuid = LUID(adapter.get()->desc1_);
+    int adapter_count = hwcodec_adapters_get_count(adapters);
+    for (int i = 0; i < adapter_count; i++) {
+      int64_t currentLuid = hwcodec_adapters_get_adapter_luid(adapters, i);
       if (util::skip_test(excludedLuids, excludeFormats, excludeCount, currentLuid, dataFormat)) {
         continue;
       }
       
       AMFEncoder *e = nullptr;
       try {
+        ID3D11Device* device = (ID3D11Device*)hwcodec_adapters_get_adapter_device(adapters, i);
         e = (AMFEncoder *)amf_new_encoder(
-            (void *)adapter.get()->device_.Get(), currentLuid,
+            (void *)device, currentLuid,
             dataFormat, width, height, kbs, framerate, gop);
         if (!e)
           continue;
@@ -623,7 +654,7 @@ int amf_test_encode(int64_t *outLuids, int32_t *outVendors, int32_t maxDescNum, 
         AMF_RESULT test_res = e->test();
         if (test_res == AMF_OK) {
           outLuids[count] = currentLuid;
-          outVendors[count] = VENDOR_AMD;
+          outVendors[count] = Vendor::VENDOR_AMD;
           count += 1;
         }
       } catch (const std::exception &ex) {
@@ -645,6 +676,7 @@ int amf_test_encode(int64_t *outLuids, int32_t *outVendors, int32_t maxDescNum, 
       if (count >= maxDescNum)
         break;
     }
+    hwcodec_adapters_destroy(adapters);
     *outDescNum = count;
     return 0;
 

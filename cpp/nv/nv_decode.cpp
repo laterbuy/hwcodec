@@ -15,6 +15,7 @@
 #include "common.h"
 #include "system.h"
 #include "util.h"
+#include "platform/win/win_rust_ffi.h"
 
 #define LOG_MODULE "CUVID"
 #include "log.h"
@@ -106,7 +107,7 @@ public:
   ComPtr<ID3D11VertexShader> vertexShader_ = NULL;
   ComPtr<ID3D11PixelShader> pixelShader_ = NULL;
   ComPtr<ID3D11SamplerState> samplerLinear_ = NULL;
-  std::unique_ptr<NativeDevice> native_ = nullptr;
+  NativeDeviceHandle native_ = nullptr;
 
   void *device_;
   int64_t luid_;
@@ -128,7 +129,12 @@ public:
     load_driver(&cudl_, &cvdl_);
   }
 
-  ~CuvidDecoder() {}
+  ~CuvidDecoder() {
+    if (native_) {
+      hwcodec_native_device_destroy(native_);
+      native_ = nullptr;
+    }
+  }
 
   bool init() {
     if (!succ(cudl_->cuInit(0))) {
@@ -136,12 +142,26 @@ public:
       return false;
     }
     CUdevice cuDevice = 0;
-    native_ = std::make_unique<NativeDevice>();
-    if (!native_->Init(luid_, (ID3D11Device *)device_, 4)) {
+    native_ = hwcodec_native_device_new(luid_, (ID3D11Device *)device_, 4);
+    if (!native_) {
       LOG_ERROR(std::string("Failed to init native device"));
       return false;
     }
-    if (!succ(cudl_->cuD3D11GetDevice(&cuDevice, native_->adapter_.Get()))) {
+    // 获取 adapter 用于 CUDA
+    ID3D11Device* device = (ID3D11Device*)hwcodec_native_device_get_device(native_);
+    ComPtr<IDXGIDevice> dxgiDevice;
+    HRESULT hr = device->QueryInterface(__uuidof(IDXGIDevice), (void**)dxgiDevice.GetAddressOf());
+    if (FAILED(hr)) {
+      LOG_ERROR(std::string("Failed to get IDXGIDevice"));
+      return false;
+    }
+    ComPtr<IDXGIAdapter> adapter;
+    hr = dxgiDevice->GetAdapter(adapter.GetAddressOf());
+    if (FAILED(hr)) {
+      LOG_ERROR(std::string("Failed to get adapter"));
+      return false;
+    }
+    if (!succ(cudl_->cuD3D11GetDevice(&cuDevice, adapter.Get()))) {
       LOG_ERROR(std::string("Failed to get cuDevice"));
       return false;
     }
@@ -185,35 +205,36 @@ public:
     bool decoded = false;
     for (int i = 0; i < nFrameReturned; i++) {
       uint8_t *pFrame = dec_->GetFrame();
-      native_->BeginQuery();
+      hwcodec_native_device_begin_query(native_);
       if (!copy_cuda_frame(pFrame)) {
         LOG_ERROR(std::string("copy_cuda_frame failed"));
-        native_->EndQuery();
+        hwcodec_native_device_end_query(native_);
         return -1;
       }
-      if (!native_->EnsureTexture(width, height)) {
+      if (!hwcodec_native_device_ensure_texture(native_, width, height)) {
         LOG_ERROR(std::string("EnsureTexture failed"));
-        native_->EndQuery();
+        hwcodec_native_device_end_query(native_);
         return -1;
       }
-      native_->next();
-      if (!set_rtv(native_->GetCurrentTexture())) {
+      hwcodec_native_device_next(native_);
+      ID3D11Texture2D* current_texture = (ID3D11Texture2D*)hwcodec_native_device_get_current_texture(native_);
+      if (!set_rtv(current_texture)) {
         LOG_ERROR(std::string("set_rtv failed"));
-        native_->EndQuery();
+        hwcodec_native_device_end_query(native_);
         return -1;
       }
       if (!draw()) {
         LOG_ERROR(std::string("draw failed"));
-        native_->EndQuery();
+        hwcodec_native_device_end_query(native_);
         return -1;
       }
-      native_->EndQuery();
-      if (!native_->Query()) {
+      hwcodec_native_device_end_query(native_);
+      if (!hwcodec_native_device_query(native_)) {
         LOG_ERROR(std::string("Query failed"));
       }
 
       if (callback)
-        callback(native_->GetCurrentTexture(), obj);
+        callback(current_texture, obj);
       decoded = true;
     }
     return decoded ? 0 : -1;
@@ -312,8 +333,9 @@ private:
   }
 
   bool draw() {
-    native_->context_->Draw(NUMVERTICES, 0);
-    native_->context_->Flush();
+    ID3D11DeviceContext* context = (ID3D11DeviceContext*)hwcodec_native_device_get_context(native_);
+    context->Draw(NUMVERTICES, 0);
+    context->Flush();
 
     return true;
   }
@@ -382,6 +404,9 @@ private:
               ", height:" + std::to_string(height) +
               ", chromaHeight:" + std::to_string(chromaHeight));
 
+    ID3D11Device* device = (ID3D11Device*)hwcodec_native_device_get_device(native_);
+    ID3D11DeviceContext* context = (ID3D11DeviceContext*)hwcodec_native_device_get_context(native_);
+
     D3D11_TEXTURE2D_DESC desc;
     ZeroMemory(&desc, sizeof(desc));
     desc.Width = width;
@@ -395,47 +420,50 @@ private:
     desc.Usage = D3D11_USAGE_DEFAULT;
     desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
     desc.CPUAccessFlags = 0;
-    HRB(native_->device_->CreateTexture2D(
+    HRB(device->CreateTexture2D(
         &desc, nullptr, textures_[0].ReleaseAndGetAddressOf()));
 
     desc.Format = DXGI_FORMAT_R8G8_UNORM;
     desc.Width = width / 2;
     desc.Height = chromaHeight;
-    HRB(native_->device_->CreateTexture2D(
+    HRB(device->CreateTexture2D(
         &desc, nullptr, textures_[1].ReleaseAndGetAddressOf()));
 
     D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc;
     srvDesc = CD3D11_SHADER_RESOURCE_VIEW_DESC(textures_[0].Get(),
                                                D3D11_SRV_DIMENSION_TEXTURE2D,
                                                DXGI_FORMAT_R8_UNORM);
-    HRB(native_->device_->CreateShaderResourceView(
+    HRB(device->CreateShaderResourceView(
         textures_[0].Get(), &srvDesc, SRV_[0].ReleaseAndGetAddressOf()));
 
     srvDesc = CD3D11_SHADER_RESOURCE_VIEW_DESC(textures_[1].Get(),
                                                D3D11_SRV_DIMENSION_TEXTURE2D,
                                                DXGI_FORMAT_R8G8_UNORM);
-    HRB(native_->device_->CreateShaderResourceView(
+    HRB(device->CreateShaderResourceView(
         textures_[1].Get(), &srvDesc, SRV_[1].ReleaseAndGetAddressOf()));
 
     // set SRV
     std::array<ID3D11ShaderResourceView *, 2> const textureViews = {
         SRV_[0].Get(), SRV_[1].Get()};
-    native_->context_->PSSetShaderResources(0, static_cast<UINT>(textureViews.size()),
+    context->PSSetShaderResources(0, static_cast<UINT>(textureViews.size()),
                                             textureViews.data());
     return true;
   }
 
   bool set_rtv(ID3D11Texture2D *texture) {
+    ID3D11Device* device = (ID3D11Device*)hwcodec_native_device_get_device(native_);
+    ID3D11DeviceContext* context = (ID3D11DeviceContext*)hwcodec_native_device_get_context(native_);
+
     D3D11_RENDER_TARGET_VIEW_DESC rtDesc;
     rtDesc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
     rtDesc.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;
     rtDesc.Texture2D.MipSlice = 0;
-    HRB(native_->device_->CreateRenderTargetView(
+    HRB(device->CreateRenderTargetView(
         texture, &rtDesc, RTV_.ReleaseAndGetAddressOf()));
 
     const float clearColor[4] = {0.0f, 0.0f, 0.0f, 0.0f}; // clear as black
-    native_->context_->ClearRenderTargetView(RTV_.Get(), clearColor);
-    native_->context_->OMSetRenderTargets(1, RTV_.GetAddressOf(), NULL);
+    context->ClearRenderTargetView(RTV_.Get(), clearColor);
+    context->OMSetRenderTargets(1, RTV_.GetAddressOf(), NULL);
 
     return true;
   }
@@ -444,6 +472,8 @@ private:
     int width = dec_->GetWidth();
     int height = dec_->GetHeight();
 
+    ID3D11DeviceContext* context = (ID3D11DeviceContext*)hwcodec_native_device_get_context(native_);
+
     D3D11_VIEWPORT vp;
     vp.Width = (FLOAT)(width);
     vp.Height = (FLOAT)(height);
@@ -451,16 +481,19 @@ private:
     vp.MaxDepth = 1.0f;
     vp.TopLeftX = 0;
     vp.TopLeftY = 0;
-    native_->context_->RSSetViewports(1, &vp);
+    context->RSSetViewports(1, &vp);
 
     return true;
   }
 
   bool set_sample() {
+    ID3D11Device* device = (ID3D11Device*)hwcodec_native_device_get_device(native_);
+    ID3D11DeviceContext* context = (ID3D11DeviceContext*)hwcodec_native_device_get_context(native_);
+
     D3D11_SAMPLER_DESC sampleDesc = CD3D11_SAMPLER_DESC(CD3D11_DEFAULT());
-    HRB(native_->device_->CreateSamplerState(
+    HRB(device->CreateSamplerState(
         &sampleDesc, samplerLinear_.ReleaseAndGetAddressOf()));
-    native_->context_->PSSetSamplers(0, 1, samplerLinear_.GetAddressOf());
+    context->PSSetSamplers(0, 1, samplerLinear_.GetAddressOf());
     return true;
   }
 
@@ -468,9 +501,12 @@ private:
 // https://gist.github.com/RomiTT/9c05d36fe339b899793a3252297a5624
 #include "pixel_shader_601.h"
 #include "vertex_shader.h"
-    native_->device_->CreateVertexShader(
+    ID3D11Device* device = (ID3D11Device*)hwcodec_native_device_get_device(native_);
+    ID3D11DeviceContext* context = (ID3D11DeviceContext*)hwcodec_native_device_get_context(native_);
+
+    device->CreateVertexShader(
         g_VS, ARRAYSIZE(g_VS), nullptr, vertexShader_.ReleaseAndGetAddressOf());
-    native_->device_->CreatePixelShader(g_PS, ARRAYSIZE(g_PS), nullptr,
+    device->CreatePixelShader(g_PS, ARRAYSIZE(g_PS), nullptr,
                                         pixelShader_.ReleaseAndGetAddressOf());
 
     // set InputLayout
@@ -481,24 +517,27 @@ private:
          D3D11_INPUT_PER_VERTEX_DATA, 0},
     }};
     ComPtr<ID3D11InputLayout> inputLayout = NULL;
-    HRB(native_->device_->CreateInputLayout(Layout.data(), static_cast<UINT>(Layout.size()), g_VS,
+    HRB(device->CreateInputLayout(Layout.data(), static_cast<UINT>(Layout.size()), g_VS,
                                             ARRAYSIZE(g_VS),
                                             inputLayout.GetAddressOf()));
-    native_->context_->IASetInputLayout(inputLayout.Get());
+    context->IASetInputLayout(inputLayout.Get());
 
-    native_->context_->VSSetShader(vertexShader_.Get(), NULL, 0);
-    native_->context_->PSSetShader(pixelShader_.Get(), NULL, 0);
+    context->VSSetShader(vertexShader_.Get(), NULL, 0);
+    context->PSSetShader(pixelShader_.Get(), NULL, 0);
 
     return true;
   }
 
   bool set_vertex_buffer() {
+    ID3D11Device* device = (ID3D11Device*)hwcodec_native_device_get_device(native_);
+    ID3D11DeviceContext* context = (ID3D11DeviceContext*)hwcodec_native_device_get_context(native_);
+
     UINT Stride = sizeof(VERTEX);
     UINT Offset = 0;
     FLOAT blendFactor[4] = {0.f, 0.f, 0.f, 0.f};
-    native_->context_->OMSetBlendState(nullptr, blendFactor, 0xffffffff);
+    context->OMSetBlendState(nullptr, blendFactor, 0xffffffff);
 
-    native_->context_->IASetPrimitiveTopology(
+    context->IASetPrimitiveTopology(
         D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 
     // set VertexBuffers
@@ -521,8 +560,8 @@ private:
     InitData.pSysMem = Vertices;
     ComPtr<ID3D11Buffer> VertexBuffer = nullptr;
     // Create vertex buffer
-    HRB(native_->device_->CreateBuffer(&BufferDesc, &InitData, &VertexBuffer));
-    native_->context_->IASetVertexBuffers(0, 1, VertexBuffer.GetAddressOf(),
+    HRB(device->CreateBuffer(&BufferDesc, &InitData, &VertexBuffer));
+    context->IASetVertexBuffers(0, 1, VertexBuffer.GetAddressOf(),
                                           &Stride, &Offset);
 
     return true;
@@ -654,12 +693,13 @@ int nv_test_decode(int64_t *outLuids, int32_t *outVendors, int32_t maxDescNum,
                    int32_t *outDescNum, DataFormat dataFormat,
                    uint8_t *data, int32_t length, const int64_t *excludedLuids, const int32_t *excludeFormats, int32_t excludeCount) {
   try {
-    Adapters adapters;
-    if (!adapters.Init(ADAPTER_VENDOR_NVIDIA))
+    AdaptersHandle adapters = hwcodec_adapters_new(ADAPTER_VENDOR_NVIDIA);
+    if (!adapters)
       return -1;
     int count = 0;
-    for (auto &adapter : adapters.adapters_) {
-      int64_t currentLuid = LUID(adapter.get()->desc1_);
+    int adapter_count = hwcodec_adapters_get_count(adapters);
+    for (int i = 0; i < adapter_count; i++) {
+      int64_t currentLuid = hwcodec_adapters_get_adapter_luid(adapters, i);
       if (util::skip_test(excludedLuids, excludeFormats, excludeCount, currentLuid, dataFormat)) {
         continue;
       }
@@ -682,6 +722,7 @@ int nv_test_decode(int64_t *outLuids, int32_t *outVendors, int32_t maxDescNum,
       if (count >= maxDescNum)
         break;
     }
+    hwcodec_adapters_destroy(adapters);
     *outDescNum = count;
     return 0;
   } catch (const std::exception &e) {

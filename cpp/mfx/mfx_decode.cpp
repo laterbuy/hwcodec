@@ -8,6 +8,7 @@
 #include "common.h"
 #include "system.h"
 #include "util.h"
+#include "platform/win/win_rust_ffi.h"
 
 #define LOG_MODULE "MFXDEC"
 #include "log.h"
@@ -28,7 +29,7 @@ namespace {
 
 class VplDecoder {
 public:
-  std::unique_ptr<NativeDevice> native_ = nullptr;
+  NativeDeviceHandle native_ = nullptr;
   MFXVideoSession session_;
   MFXVideoDECODE *mfxDEC_ = NULL;
   std::vector<mfxFrameSurface1> pmfxSurfaces_;
@@ -52,7 +53,12 @@ public:
     ZeroMemory(&mfxResponse_, sizeof(mfxResponse_));
   }
 
-  ~VplDecoder() {}
+  ~VplDecoder() {
+    if (native_) {
+      hwcodec_native_device_destroy(native_);
+      native_ = nullptr;
+    }
+  }
 
   int destroy() {
     if (mfxDEC_) {
@@ -65,8 +71,8 @@ public:
 
   mfxStatus init() {
     mfxStatus sts = MFX_ERR_NONE;
-    native_ = std::make_unique<NativeDevice>();
-    if (!native_->Init(luid_, (ID3D11Device *)device_, 4)) {
+    native_ = hwcodec_native_device_new(luid_, (ID3D11Device *)device_, 4);
+    if (!native_) {
       LOG_ERROR(std::string("Failed to initialize native device"));
       return MFX_ERR_DEVICE_FAILED;
     }
@@ -162,8 +168,10 @@ public:
           LOG_ERROR(std::string("Failed to convert"));
           break;
         }
-        if (callback)
-          callback(native_->GetCurrentTexture(), obj);
+        if (callback) {
+          ID3D11Texture2D* current_texture = (ID3D11Texture2D*)hwcodec_native_device_get_current_texture(native_);
+          callback(current_texture, obj);
+        }
         decoded = true;
         break;
       } else if (MFX_WRN_DEVICE_BUSY == sts) {
@@ -219,11 +227,12 @@ private:
     sts = session_.Init(impl, &ver);
     CHECK_STATUS(sts, "session Init");
 
-    sts = session_.SetHandle(MFX_HANDLE_D3D11_DEVICE, native_->device_.Get());
+    ID3D11Device* device = (ID3D11Device*)hwcodec_native_device_get_device(native_);
+    sts = session_.SetHandle(MFX_HANDLE_D3D11_DEVICE, device);
     CHECK_STATUS(sts, "SetHandle");
 
     allocParams.bUseSingleTexture = false; // important
-    allocParams.pDevice = native_->device_.Get();
+    allocParams.pDevice = device;
     allocParams.uncompressedResourceMiscFlags = 0;
     sts = d3d11FrameAllocator_.Init(&allocParams);
     CHECK_STATUS(sts, "init D3D11FrameAllocator");
@@ -323,25 +332,25 @@ private:
     ID3D11Texture2D *texture = (ID3D11Texture2D *)pair.first;
     D3D11_TEXTURE2D_DESC desc2D;
     texture->GetDesc(&desc2D);
-    if (!native_->EnsureTexture(pmfxOutSurface->Info.CropW,
+    if (!hwcodec_native_device_ensure_texture(native_, pmfxOutSurface->Info.CropW,
                                 pmfxOutSurface->Info.CropH)) {
       LOG_ERROR(std::string("Failed to EnsureTexture"));
       return false;
     }
-    native_->next(); // comment out to remove picture shaking
+    hwcodec_native_device_next(native_); // comment out to remove picture shaking
 #ifdef USE_SHADER
-    native_->BeginQuery();
-    if (!native_->Nv12ToBgra(pmfxOutSurface->Info.CropW,
-                             pmfxOutSurface->Info.CropH, texture,
-                             native_->GetCurrentTexture(), 0)) {
+    hwcodec_native_device_begin_query(native_);
+    ID3D11Texture2D* current_texture = (ID3D11Texture2D*)hwcodec_native_device_get_current_texture(native_);
+    if (!hwcodec_native_device_nv12_to_bgra(native_, texture, current_texture,
+                             pmfxOutSurface->Info.CropW, pmfxOutSurface->Info.CropH, 0)) {
       LOG_ERROR(std::string("Failed to Nv12ToBgra"));
-      native_->EndQuery();
+      hwcodec_native_device_end_query(native_);
       return false;
     }
-    native_->EndQuery();
-    native_->Query();
+    hwcodec_native_device_end_query(native_);
+    hwcodec_native_device_query(native_);
 #else
-    native_->BeginQuery();
+    hwcodec_native_device_begin_query(native_);
 
     // nv12 -> bgra
     D3D11_VIDEO_PROCESSOR_CONTENT_DESC contentDesc;
@@ -372,16 +381,19 @@ private:
         colorSpace_in = DXGI_COLOR_SPACE_YCBCR_STUDIO_G22_LEFT_P601;
       }
     }
-    if (!native_->Process(texture, native_->GetCurrentTexture(), contentDesc,
-                          colorSpace_in, colorSpace_out, 0)) {
+    ID3D11Texture2D* current_texture = (ID3D11Texture2D*)hwcodec_native_device_get_current_texture(native_);
+    if (!hwcodec_native_device_process(native_, texture, current_texture,
+                          pmfxOutSurface->Info.CropW, pmfxOutSurface->Info.CropH,
+                          &contentDesc, colorSpace_in, colorSpace_out, 0)) {
       LOG_ERROR(std::string("Failed to process"));
-      native_->EndQuery();
+      hwcodec_native_device_end_query(native_);
       return false;
     }
 
-    native_->context_->Flush();
-    native_->EndQuery();
-    if (!native_->Query()) {
+    ID3D11DeviceContext* context = (ID3D11DeviceContext*)hwcodec_native_device_get_context(native_);
+    context->Flush();
+    hwcodec_native_device_end_query(native_);
+    if (!hwcodec_native_device_query(native_)) {
       LOG_ERROR(std::string("Failed to query"));
       return false;
     }
@@ -442,12 +454,13 @@ int mfx_test_decode(int64_t *outLuids, int32_t *outVendors, int32_t maxDescNum,
                     int32_t *outDescNum, DataFormat dataFormat,
                     uint8_t *data, int32_t length, const int64_t *excludedLuids, const int32_t *excludeFormats, int32_t excludeCount) {
   try {
-    Adapters adapters;
-    if (!adapters.Init(ADAPTER_VENDOR_INTEL))
+    AdaptersHandle adapters = hwcodec_adapters_new(ADAPTER_VENDOR_INTEL);
+    if (!adapters)
       return -1;
     int count = 0;
-    for (auto &adapter : adapters.adapters_) {
-      int64_t currentLuid = LUID(adapter.get()->desc1_);
+    int adapter_count = hwcodec_adapters_get_count(adapters);
+    for (int i = 0; i < adapter_count; i++) {
+      int64_t currentLuid = hwcodec_adapters_get_adapter_luid(adapters, i);
       if (util::skip_test(excludedLuids, excludeFormats, excludeCount, currentLuid, dataFormat)) {
         continue;
       }
@@ -470,6 +483,7 @@ int mfx_test_decode(int64_t *outLuids, int32_t *outVendors, int32_t maxDescNum,
       if (count >= maxDescNum)
         break;
     }
+    hwcodec_adapters_destroy(adapters);
     *outDescNum = count;
     return 0;
   } catch (const std::exception &e) {

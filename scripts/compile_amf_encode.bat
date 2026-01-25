@@ -1,15 +1,20 @@
 @echo off
 REM Compile amf_encode.cpp using MSVC
 
+REM Get the script directory and project root (one level up)
+set SCRIPT_DIR=%~dp0
+set WORKSPACE=%SCRIPT_DIR%..
+cd /d "%WORKSPACE%"
+
 REM Set up MSVC environment
 call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
 
 REM Set variables
-set SOURCE_FILE=D:\workspace\rust\hwcodec\cpp\amf\amf_encode.cpp
+set SOURCE_FILE=%WORKSPACE%\cpp\amf\amf_encode.cpp
 set OUTPUT_FILE=amf_encode.obj
-set COMMON_DIR=D:\workspace\rust\hwcodec\cpp\common
+set COMMON_DIR=%WORKSPACE%\cpp\common
 set WIN_DIR=%COMMON_DIR%\platform\win
-set EXTERNALS_DIR=D:\workspace\rust\hwcodec\externals
+set EXTERNALS_DIR=%WORKSPACE%\externals
 set AMF_DIR=%EXTERNALS_DIR%\AMF_v1.4.35
 
 REM Compile

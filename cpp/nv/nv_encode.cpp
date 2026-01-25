@@ -21,6 +21,7 @@ using Microsoft::WRL::ComPtr;
 #include "common.h"
 #include "system.h"
 #include "util.h"
+#include "platform/win/win_rust_ffi.h"
 
 #define LOG_MODULE "NVENC"
 #include "log.h"
@@ -58,7 +59,7 @@ void free_driver(CudaFunctions **pp_cuda_dl, NvencFunctions **pp_nvenc_dl) {
 
 class NvencEncoder {
 public:
-  std::unique_ptr<NativeDevice> native_ = nullptr;
+  NativeDeviceHandle native_ = nullptr;
   NvEncoderD3D11 *pEnc_ = nullptr;
   CudaFunctions *cuda_dl_ = nullptr;
   NvencFunctions *nvenc_dl_ = nullptr;
@@ -90,7 +91,12 @@ public:
     load_driver(&cuda_dl_, &nvenc_dl_);
   }
 
-  ~NvencEncoder() {}
+  ~NvencEncoder() {
+    if (native_) {
+      hwcodec_native_device_destroy(native_);
+      native_ = nullptr;
+    }
+  }
 
   bool init() {
     GUID guidCodec;
@@ -111,25 +117,39 @@ public:
       return false;
     }
 
-    native_ = std::make_unique<NativeDevice>();
 #ifdef CONFIG_NV_OPTIMUS_FOR_DEV
-    if (!native_->Init(luid_, nullptr))
-      return false;
+    native_ = hwcodec_native_device_new(luid_, nullptr, 1);
 #else
-    if (!native_->Init(luid_, (ID3D11Device *)handle_)) {
+    native_ = hwcodec_native_device_new(luid_, (ID3D11Device *)handle_, 1);
+#endif
+    if (!native_) {
       LOG_ERROR(std::string("d3d device init failed"));
       return false;
     }
-#endif
+
+    // 获取 adapter 用于 CUDA
+    ID3D11Device* device = (ID3D11Device*)hwcodec_native_device_get_device(native_);
+    ComPtr<IDXGIDevice> dxgiDevice;
+    HRESULT hr = device->QueryInterface(__uuidof(IDXGIDevice), (void**)dxgiDevice.GetAddressOf());
+    if (FAILED(hr)) {
+      LOG_ERROR(std::string("Failed to get IDXGIDevice"));
+      return false;
+    }
+    ComPtr<IDXGIAdapter> adapter;
+    hr = dxgiDevice->GetAdapter(adapter.GetAddressOf());
+    if (FAILED(hr)) {
+      LOG_ERROR(std::string("Failed to get adapter"));
+      return false;
+    }
 
     CUdevice cuDevice = 0;
-    if (!succ(cuda_dl_->cuD3D11GetDevice(&cuDevice, native_->adapter_.Get()))) {
+    if (!succ(cuda_dl_->cuD3D11GetDevice(&cuDevice, adapter.Get()))) {
       LOG_ERROR(std::string("Failed to get cuDevice"));
       return false;
     }
 
     int nExtraOutputDelay = 0;
-    pEnc_ = new NvEncoderD3D11(cuda_dl_, nvenc_dl_, native_->device_.Get(),
+    pEnc_ = new NvEncoderD3D11(cuda_dl_, nvenc_dl_, device,
                                width_, height_, NV_ENC_BUFFER_FORMAT_ARGB,
                                nExtraOutputDelay, false, false); // no delay
     NV_ENC_INITIALIZE_PARAMS initializeParams = {0};
@@ -180,7 +200,8 @@ public:
 #ifdef CONFIG_NV_OPTIMUS_FOR_DEV
     copy_texture(texture, pBgraTextyure);
 #else
-    native_->context_->CopyResource(
+    ID3D11DeviceContext* context = (ID3D11DeviceContext*)hwcodec_native_device_get_context(native_);
+    context->CopyResource(
         pBgraTextyure, reinterpret_cast<ID3D11Texture2D *>(texture));
 #endif
 
@@ -294,7 +315,8 @@ private:
     Box.bottom = desc.Height;
     Box.front = 0;
     Box.back = 1;
-    native_->context_->UpdateSubresource(dst_tex.Get(), 0, &Box, buffer.get(),
+    ID3D11DeviceContext* context = (ID3D11DeviceContext*)hwcodec_native_device_get_context(native_);
+    context->UpdateSubresource(dst_tex.Get(), 0, &Box, buffer.get(),
                                          desc.Width * 4,
                                          desc.Width * desc.Height * 4);
 
@@ -393,26 +415,29 @@ int nv_test_encode(int64_t *outLuids, int32_t *outVendors, int32_t maxDescNum, i
                    int32_t height, int32_t kbs, int32_t framerate,
                    int32_t gop, const int64_t *excludedLuids, const int32_t *excludeFormats, int32_t excludeCount) {
   try {
-    Adapters adapters;
-    if (!adapters.Init(ADAPTER_VENDOR_NVIDIA))
+    AdaptersHandle adapters = hwcodec_adapters_new(ADAPTER_VENDOR_NVIDIA);
+    if (!adapters)
       return -1;
     int count = 0;
-    for (auto &adapter : adapters.adapters_) {
-      int64_t currentLuid = LUID(adapter.get()->desc1_);
+    int adapter_count = hwcodec_adapters_get_count(adapters);
+    for (int i = 0; i < adapter_count; i++) {
+      int64_t currentLuid = hwcodec_adapters_get_adapter_luid(adapters, i);
       if (util::skip_test(excludedLuids, excludeFormats, excludeCount, currentLuid, dataFormat)) {
         continue;
       }
 
+      ID3D11Device* device = (ID3D11Device*)hwcodec_adapters_get_adapter_device(adapters, i);
       NvencEncoder *e = (NvencEncoder *)nv_new_encoder(
-          (void *)adapter.get()->device_.Get(), currentLuid,
+          (void *)device, currentLuid,
           dataFormat, width, height, kbs, framerate, gop);
       if (!e)
         continue;
-      if (e->native_->EnsureTexture(e->width_, e->height_)) {
-        e->native_->next();
+      if (hwcodec_native_device_ensure_texture(e->native_, e->width_, e->height_)) {
+        hwcodec_native_device_next(e->native_);
+        ID3D11Texture2D* current_texture = (ID3D11Texture2D*)hwcodec_native_device_get_current_texture(e->native_);
         int32_t key_obj = 0;
         auto start = util::now();
-        bool succ = nv_encode(e, e->native_->GetCurrentTexture(), util_encode::vram_encode_test_callback, &key_obj,
+        bool succ = nv_encode(e, current_texture, util_encode::vram_encode_test_callback, &key_obj,
                       0) == 0 && key_obj == 1;
         int64_t elapsed = util::elapsed_ms(start);
         if (succ && elapsed < TEST_TIMEOUT_MS) {
@@ -427,6 +452,7 @@ int nv_test_encode(int64_t *outLuids, int32_t *outVendors, int32_t maxDescNum, i
       if (count >= maxDescNum)
         break;
     }
+    hwcodec_adapters_destroy(adapters);
     *outDescNum = count;
     return 0;
 

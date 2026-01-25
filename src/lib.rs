@@ -1,6 +1,12 @@
 pub mod common;
 #[cfg(windows)]
+pub mod platform;
+#[cfg(windows)]
 pub mod vram;
+
+// 导出 FFI 函数（与 C++ 代码兼容）
+#[cfg(windows)]
+pub use platform::win::ffi::*;
 
 #[no_mangle]
 pub extern "C" fn hwcodec_log(level: i32, message: *const std::os::raw::c_char) {

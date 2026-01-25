@@ -1,3 +1,15 @@
+// NOTE: This file contains C++ implementations of NativeDevice, Adapter, and Adapters classes.
+// These classes are still used by C++ encoder/decoder modules (nv_encode.cpp, mfx_encode.cpp, etc.).
+//
+// The following FFI functions have been rewritten in Rust (src/platform/win/ffi.rs):
+//   - GetHwcodecGpuSignature() - See src/platform/win/utils.rs::get_gpu_signature()
+//   - hwcodec_get_d3d11_texture_width_height() - See src/platform/win/texture.rs::get_texture_width_height()
+//   - add_process_to_new_job() - See src/platform/win/utils.rs::add_process_to_new_job()
+//
+// The C++ implementations of these functions are commented out below (around line 711) to avoid
+// duplicate symbol errors during linking. The Rust implementations are exported via FFI and
+// linked into the final binary.
+
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -705,6 +717,10 @@ int Adapters::GetFirstAdapterIndex(AdapterVendor vendor) {
 
 // https://asawicki.info/news_1773_how_to_programmatically_check_graphics_driver_version
 // https://github.com/citizenfx/fivem/issues/1121
+// NOTE: These functions have been rewritten in Rust (src/platform/win/ffi.rs)
+// and are now exported from the Rust library. The C++ implementations are
+// commented out to avoid duplicate symbol errors during linking.
+/*
 uint64_t GetHwcodecGpuSignature() {
   uint64_t signature = 0;
   ComPtr<IDXGIFactory1> factory1 = nullptr;
@@ -794,3 +810,4 @@ int32_t add_process_to_new_job(DWORD process_id) {
 
   return 0;
 }
+*/

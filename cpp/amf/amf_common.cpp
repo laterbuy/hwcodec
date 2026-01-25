@@ -8,7 +8,9 @@
 #endif
 
 static bool convert_api(amf::AMF_MEMORY_TYPE &rhs) {
-  // Always use DX11 since it's the only supported API
+  // NOTE: Windows platform-specific - AMF on Windows only supports DirectX 11
+  // This is required by AMF SDK and cannot be replaced with Rust
+  // The actual D3D11 device management is handled by Rust (via FFI)
   rhs = amf::AMF_MEMORY_DX11;
   return true;
 }

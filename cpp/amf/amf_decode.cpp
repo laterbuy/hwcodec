@@ -13,9 +13,34 @@
 #include "common.h"
 #include "system.h"
 #include "util.h"
+#include "platform/win/win_rust_ffi.h"
 
 #define LOG_MODULE "AMFDEC"
 #include "log.h"
+
+// ============================================================================
+// NOTE: Windows Platform-Specific Code - PARTIALLY REPLACED
+// ============================================================================
+// This file contains Windows-specific AMF SDK calls:
+//   - AMF_MEMORY_DX11: DirectX 11 memory type (Windows only)
+//   - InitDX11(): Initialize AMF with D3D11 device (Windows only)
+//   - D3D11 texture operations: CopyResource, Flush (Windows only)
+//
+// REPLACEMENT STATUS:
+//   ✅ Windows platform management (device creation, adapter enumeration) → Rust (src/platform/win/)
+//   ✅ Device access → Rust FFI (hwcodec_native_device_get_device, hwcodec_native_device_get_context)
+//   ⚠️  AMF SDK API calls → MUST REMAIN IN C++ (AMF SDK is C++ library)
+//
+// WHY AMF SDK CALLS CANNOT BE REPLACED:
+//   1. AMF SDK is a C++ library with C++ interfaces (smart pointers, COM-like)
+//   2. AMF SDK requires direct C++ object manipulation (AMFFactory, AMFContext, etc.)
+//   3. Creating Rust bindings for entire AMF SDK would be extremely complex
+//   4. The C++ code here is minimal - just AMF SDK wrapper calls
+//
+// All Windows platform management (device creation, adapter enumeration) is handled
+// by Rust implementations in src/platform/win/ and exposed via FFI.
+// This file now only contains AMF SDK wrapper code, not Windows platform code.
+// ============================================================================
 
 #define AMF_FACILITY L"AMFDecoder"
 
@@ -32,7 +57,7 @@ private:
   // system
   void *device_;
   int64_t luid_;
-  std::unique_ptr<NativeDevice> nativeDevice_ = nullptr;
+  NativeDeviceHandle nativeDevice_ = nullptr;
   // amf
   AMFFactoryHelper AMFFactory_;
   amf::AMFContextPtr AMFContext_ = NULL;
@@ -60,7 +85,12 @@ public:
     codec_ = codec;
   }
 
-  ~AMFDecoder() {}
+  ~AMFDecoder() {
+    if (nativeDevice_) {
+      hwcodec_native_device_destroy(nativeDevice_);
+      nativeDevice_ = nullptr;
+    }
+  }
 
   AMF_RESULT decode(uint8_t *iData, uint32_t iDataSize, DecodeCallback callback,
                     void *obj) {
@@ -122,11 +152,12 @@ public:
           ID3D11Texture2D *src = (ID3D11Texture2D *)native;
           D3D11_TEXTURE2D_DESC desc;
           src->GetDesc(&desc);
-          nativeDevice_->EnsureTexture(desc.Width, desc.Height);
-          nativeDevice_->next();
-          ID3D11Texture2D *dst = nativeDevice_->GetCurrentTexture();
-          nativeDevice_->context_->CopyResource(dst, src);
-          nativeDevice_->context_->Flush();
+          hwcodec_native_device_ensure_texture(nativeDevice_, desc.Width, desc.Height);
+          hwcodec_native_device_next(nativeDevice_);
+          ID3D11Texture2D *dst = (ID3D11Texture2D*)hwcodec_native_device_get_current_texture(nativeDevice_);
+          ID3D11DeviceContext* context = (ID3D11DeviceContext*)hwcodec_native_device_get_context(nativeDevice_);
+          context->CopyResource(dst, src);
+          context->Flush();
           if (callback)
             callback(dst, obj);
           decoded = true;
@@ -186,13 +217,13 @@ public:
 
     switch (AMFMemoryType_) {
     case amf::AMF_MEMORY_DX11:
-      nativeDevice_ = std::make_unique<NativeDevice>();
-      if (!nativeDevice_->Init(luid_, (ID3D11Device *)device_, 4)) {
+      nativeDevice_ = hwcodec_native_device_new(luid_, (ID3D11Device *)device_, 4);
+      if (!nativeDevice_) {
         LOG_ERROR(std::string("Init NativeDevice failed"));
         return AMF_FAIL;
       }
-      res = AMFContext_->InitDX11(
-          nativeDevice_->device_.Get()); // can be DX11 device
+      ID3D11Device* device = (ID3D11Device*)hwcodec_native_device_get_device(nativeDevice_);
+      res = AMFContext_->InitDX11(device); // can be DX11 device
       AMF_CHECK_RETURN(res, "InitDX11 failed");
       break;
     default:
@@ -428,12 +459,13 @@ int amf_test_decode(int64_t *outLuids, int32_t *outVendors, int32_t maxDescNum,
                     int32_t *outDescNum, DataFormat dataFormat,
                     uint8_t *data, int32_t length, const int64_t *excludedLuids, const int32_t *excludeFormats, int32_t excludeCount) {
   try {
-    Adapters adapters;
-    if (!adapters.Init(ADAPTER_VENDOR_AMD))
+    AdaptersHandle adapters = hwcodec_adapters_new(AdapterVendor::ADAPTER_VENDOR_AMD);
+    if (!adapters)
       return -1;
     int count = 0;
-    for (auto &adapter : adapters.adapters_) {
-      int64_t currentLuid = LUID(adapter.get()->desc1_);
+    int adapter_count = hwcodec_adapters_get_count(adapters);
+    for (int i = 0; i < adapter_count; i++) {
+      int64_t currentLuid = hwcodec_adapters_get_adapter_luid(adapters, i);
       if (util::skip_test(excludedLuids, excludeFormats, excludeCount, currentLuid, dataFormat)) {
         continue;
       }
@@ -447,7 +479,7 @@ int amf_test_decode(int64_t *outLuids, int32_t *outVendors, int32_t maxDescNum,
       int64_t elapsed = util::elapsed_ms(start);
       if (succ && elapsed < TEST_TIMEOUT_MS) {
         outLuids[count] = currentLuid;
-        outVendors[count] = VENDOR_AMD;
+        outVendors[count] = Vendor::VENDOR_AMD;
         count += 1;
       }
       p->destroy();
@@ -456,6 +488,7 @@ int amf_test_decode(int64_t *outLuids, int32_t *outVendors, int32_t maxDescNum,
       if (count >= maxDescNum)
         break;
     }
+    hwcodec_adapters_destroy(adapters);
     *outDescNum = count;
     return 0;
   } catch (const std::exception &e) {
