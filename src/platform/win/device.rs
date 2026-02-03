@@ -27,7 +27,7 @@ pub struct NativeDevice {
     last_content_desc: Option<D3D11_VIDEO_PROCESSOR_CONTENT_DESC>,
     
     // 纹理池
-    textures: Vec<ID3D11Texture2D>,
+    textures: Vec<Option<ID3D11Texture2D>>,
     current_index: usize,
     pool_size: usize,
     
@@ -271,7 +271,7 @@ impl NativeDevice {
     /// 确保存在指定尺寸的共享纹理
     pub fn ensure_texture(&mut self, width: u32, height: u32) -> Result<()> {
         // 检查现有纹理是否满足要求
-        if let Some(existing) = self.textures.first() {
+        if let Some(Some(existing)) = self.textures.first() {
             let desc = unsafe {
                 let mut desc = std::mem::zeroed();
                 existing.GetDesc(&mut desc);
@@ -307,7 +307,7 @@ impl NativeDevice {
             unsafe {
                 let mut texture = None;
                 self.device.CreateTexture2D(&desc, None, Some(&mut texture))?;
-                self.textures.push(texture.unwrap());
+                self.textures.push(Some(texture.unwrap()));
             }
         }
 
@@ -316,13 +316,10 @@ impl NativeDevice {
 
     /// 设置当前使用的纹理
     pub fn set_texture(&mut self, texture: ID3D11Texture2D) {
-        if self.textures.len() <= self.current_index {
-            // 使用临时占位符，但立即会被替换
-            #[allow(invalid_value)]
-            let placeholder = unsafe { std::mem::MaybeUninit::<ID3D11Texture2D>::zeroed().assume_init() };
-            self.textures.resize(self.current_index + 1, placeholder);
+        while self.textures.len() <= self.current_index {
+            self.textures.push(None);
         }
-        self.textures[self.current_index] = texture;
+        self.textures[self.current_index] = Some(texture);
     }
 
     /// 获取共享句柄
@@ -333,9 +330,11 @@ impl NativeDevice {
             ));
         }
 
-        let texture = &self.textures[self.current_index];
+        let texture = self.textures[self.current_index].as_ref().ok_or_else(|| {
+            WinPlatformError::InvalidParameter("No texture at current index".to_string())
+        })?;
         unsafe {
-            let resource: IDXGIResource = windows::core::Interface::cast(texture)?;
+            let resource: IDXGIResource = texture.cast()?;
             let handle = resource.GetSharedHandle()?;
             Ok(handle)
         }
@@ -343,7 +342,7 @@ impl NativeDevice {
 
     /// 获取当前纹理
     pub fn get_current_texture(&self) -> Option<&ID3D11Texture2D> {
-        self.textures.get(self.current_index)
+        self.textures.get(self.current_index).and_then(|t| t.as_ref())
     }
 
     /// 切换到下一个纹理（循环）

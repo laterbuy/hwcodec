@@ -3,7 +3,35 @@
 #![allow(non_snake_case)]
 
 use serde_derive::{Deserialize, Serialize};
+use std::ffi::c_void;
+
 include!(concat!(env!("OUT_DIR"), "/common_ffi.rs"));
+
+/// i32 最大值，用于“无限 GOP”等（与 cpp/common/common.h 一致）
+pub const MAX_GOP: i32 = 0x7FFF_FFFF;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[repr(i32)]
+pub enum DataFormat {
+    H264 = 0,
+    H265 = 1,
+    VP8 = 2,
+    VP9 = 3,
+    AV1 = 4,
+}
+
+pub type EncodeCallback =
+    extern "C" fn(*const u8, i32, i32, *const c_void, i64);
+pub type DecodeCallback = extern "C" fn(*mut c_void, *mut c_void);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u32)]
+pub enum AdapterVendor {
+    ADAPTER_VENDOR_AMD = 0x1002,
+    ADAPTER_VENDOR_INTEL = 0x8086,
+    ADAPTER_VENDOR_NVIDIA = 0x10DE,
+    ADAPTER_VENDOR_UNKNOWN = 0,
+}
 
 pub(crate) const DATA_H264_720P: &[u8] = include_bytes!("res/720p.h264");
 pub(crate) const DATA_H265_720P: &[u8] = include_bytes!("res/720p.h265");
@@ -129,5 +157,40 @@ pub fn child_exit_when_parent_exit(child_process_id: u32) -> bool {
         }
         let result = add_process_to_new_job(child_process_id);
         result == 0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    
+    /// 测试 GPU 签名计算
+    #[test]
+    fn test_get_gpu_signature() {
+        let signature = get_gpu_signature();
+        // GPU 签名应该是一个 64 位整数
+        // 如果没有 GPU，可能是 0，这是正常的
+        println!("GPU Signature: 0x{:016X}", signature);
+    }
+    
+    /// 测试 Driver 枚举
+    #[test]
+    fn test_driver_enum() {
+        let drivers = vec![Driver::NV, Driver::AMF, Driver::MFX];
+        assert_eq!(drivers.len(), 3);
+    }
+    
+    /// 测试支持的 GPU 检测（不依赖实际 GPU）
+    #[test]
+    fn test_supported_gpu() {
+        #[cfg(any(windows, target_os = "linux"))]
+        {
+            let (nv, amd, intel) = supported_gpu(true);
+            // 这些值可能是 false（如果没有 GPU），这是正常的
+            println!("Supported GPUs (encode): NV={}, AMD={}, Intel={}", nv, amd, intel);
+            
+            let (nv_decode, amd_decode, intel_decode) = supported_gpu(false);
+            println!("Supported GPUs (decode): NV={}, AMD={}, Intel={}", nv_decode, amd_decode, intel_decode);
+        }
     }
 }

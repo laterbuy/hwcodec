@@ -1,115 +1,59 @@
 use crate::{
     common::{DataFormat::*, Driver::*},
-    vram::{amf, inner::DecodeCalls, mfx, nv, DecodeContext},
+    vram::{amf, inner::DecodeBackend, mfx, nv, DecodeContext},
 };
 use log::trace;
-use std::ffi::c_void;
+
+pub use crate::vram::inner::DecodeFrame;
 
 pub struct Decoder {
-    calls: DecodeCalls,
-    codec: *mut c_void,
-    frames: *mut Vec<DecodeFrame>,
+    backend: Box<dyn DecodeBackend>,
+    frames: Vec<DecodeFrame>,
     pub ctx: DecodeContext,
 }
 
 unsafe impl Send for Decoder {}
 unsafe impl Sync for Decoder {}
 
-extern "C" {
-    fn hwcodec_get_d3d11_texture_width_height(
-        texture: *mut c_void,
-        width: *mut i32,
-        height: *mut i32,
-    );
-}
-
 impl Decoder {
     pub fn new(ctx: DecodeContext) -> Result<Self, ()> {
-        let calls = match ctx.driver {
-            NV => nv::decode_calls(),
-            AMF => amf::decode_calls(),
-            MFX => mfx::decode_calls(),
+        let device = ctx.device.unwrap_or(std::ptr::null_mut());
+        let backend: Box<dyn DecodeBackend> = match ctx.driver {
+            NV => nv::create_decode_backend(device, ctx.luid, ctx.data_format as i32)?,
+            AMF => amf::create_decode_backend(device, ctx.luid, ctx.data_format as i32)?,
+            MFX => mfx::create_decode_backend(device, ctx.luid, ctx.data_format as i32)?,
         };
-        unsafe {
-            let codec = (calls.new)(
-                ctx.device.unwrap_or(std::ptr::null_mut()),
-                ctx.luid,
-                ctx.data_format as i32,
-            );
-            if codec.is_null() {
-                return Err(());
-            }
-            Ok(Self {
-                calls,
-                codec,
-                frames: Box::into_raw(Box::new(Vec::<DecodeFrame>::new())),
-                ctx,
-            })
-        }
+        Ok(Self {
+            backend,
+            frames: Vec::new(),
+            ctx,
+        })
     }
 
     pub fn decode(&mut self, packet: &[u8]) -> Result<&mut Vec<DecodeFrame>, i32> {
-        unsafe {
-            (&mut *self.frames).clear();
-            let ret = (self.calls.decode)(
-                self.codec,
-                packet.as_ptr() as _,
-                packet.len() as _,
-                Some(Self::callback),
-                self.frames as *mut _ as *mut c_void,
-            );
-
-            if ret != 0 {
-                Err(ret)
-            } else {
-                Ok(&mut *self.frames)
-            }
-        }
-    }
-
-    unsafe extern "C" fn callback(texture: *mut c_void, obj: *const c_void) {
-        let frames = &mut *(obj as *mut Vec<DecodeFrame>);
-        let mut width = 0;
-        let mut height = 0;
-        hwcodec_get_d3d11_texture_width_height(texture, &mut width, &mut height);
-
-        let frame = DecodeFrame {
-            texture,
-            width,
-            height,
-        };
-        frames.push(frame);
+        self.frames.clear();
+        self.backend.decode(packet, &mut self.frames)?;
+        Ok(&mut self.frames)
     }
 }
 
 impl Drop for Decoder {
     fn drop(&mut self) {
-        unsafe {
-            (self.calls.destroy)(self.codec);
-            self.codec = std::ptr::null_mut();
-            let _ = Box::from_raw(self.frames);
-            trace!("Decoder dropped");
-        }
+        self.backend.destroy();
+        trace!("Decoder dropped");
     }
-}
-
-pub struct DecodeFrame {
-    pub texture: *mut c_void,
-    pub width: i32,
-    pub height: i32,
 }
 
 pub fn available() -> Vec<DecodeContext> {
     use log::debug;
 
     let mut codecs: Vec<_> = vec![];
-    // disable nv sdk decode
-    // codecs.append(
-    //     &mut nv::possible_support_decoders()
-    //         .drain(..)
-    //         .map(|n| (NV, n))
-    //         .collect(),
-    // );
+    codecs.append(
+        &mut nv::possible_support_decoders()
+            .drain(..)
+            .map(|n| (NV, n))
+            .collect(),
+    );
     codecs.append(
         &mut amf::possible_support_decoders()
             .drain(..)

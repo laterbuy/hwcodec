@@ -1,18 +1,18 @@
 use crate::{
     common::Driver::*,
     vram::{
-        amf, inner::EncodeCalls, mfx, nv, DynamicContext, EncodeContext, FeatureContext,
+        amf, inner::EncodeBackend, mfx, nv,
+        DynamicContext, EncodeContext, FeatureContext,
     },
 };
 use log::trace;
-use std::{
-    fmt::Display, os::raw::{c_int, c_void}, slice::from_raw_parts
-};
+use std::fmt::Display;
+
+pub use crate::vram::inner::EncodeFrame;
 
 pub struct Encoder {
-    calls: EncodeCalls,
-    codec: *mut c_void,
-    frames: *mut Vec<EncodeFrame>,
+    backend: Box<dyn EncodeBackend>,
+    frames: Vec<EncodeFrame>,
     pub ctx: EncodeContext,
 }
 
@@ -24,97 +24,42 @@ impl Encoder {
         if ctx.d.width % 2 == 1 || ctx.d.height % 2 == 1 {
             return Err(());
         }
-        let calls = match ctx.f.driver {
-            NV => nv::encode_calls(),
-            AMF => amf::encode_calls(),
-            MFX => mfx::encode_calls(),
+        let device = ctx.d.device.unwrap_or(std::ptr::null_mut());
+        let backend: Box<dyn EncodeBackend> = match ctx.f.driver {
+            NV => nv::create_encode_backend(device, ctx.f.luid, ctx.f.data_format as i32,
+                ctx.d.width, ctx.d.height, ctx.d.kbitrate, ctx.d.framerate, ctx.d.gop)?,
+            AMF => amf::create_encode_backend(device, ctx.f.luid, ctx.f.data_format as i32,
+                ctx.d.width, ctx.d.height, ctx.d.kbitrate, ctx.d.framerate, ctx.d.gop)?,
+            MFX => mfx::create_encode_backend(device, ctx.f.luid, ctx.f.data_format as i32,
+                ctx.d.width, ctx.d.height, ctx.d.kbitrate, ctx.d.framerate, ctx.d.gop)?,
         };
-        unsafe {
-            let codec = (calls.new)(
-                ctx.d.device.unwrap_or(std::ptr::null_mut()),
-                ctx.f.luid,
-                ctx.f.data_format as i32,
-                ctx.d.width,
-                ctx.d.height,
-                ctx.d.kbitrate,
-                ctx.d.framerate,
-                ctx.d.gop,
-            );
-            if codec.is_null() {
-                return Err(());
-            }
-            Ok(Self {
-                calls,
-                codec,
-                frames: Box::into_raw(Box::new(Vec::<EncodeFrame>::new())),
-                ctx,
-            })
-        }
+        Ok(Self {
+            backend,
+            frames: Vec::new(),
+            ctx,
+        })
     }
 
-    pub fn encode(&mut self, tex: *mut c_void, ms: i64) -> Result<&mut Vec<EncodeFrame>, i32> {
-        unsafe {
-            (&mut *self.frames).clear();
-            let result = (self.calls.encode)(
-                self.codec,
-                tex,
-                Some(Self::callback),
-                self.frames as *mut _ as *mut c_void,
-                ms,
-            );
-            if result != 0 {
-                Err(result)
-            } else {
-                Ok(&mut *self.frames)
-            }
-        }
-    }
-
-    extern "C" fn callback(data: *const u8, size: c_int, key: i32, obj: *const c_void, pts: i64) {
-        unsafe {
-            let frames = &mut *(obj as *mut Vec<EncodeFrame>);
-            frames.push(EncodeFrame {
-                data: from_raw_parts(data, size as usize).to_vec(),
-                pts,
-                key,
-            });
-        }
+    pub fn encode(&mut self, tex: *mut std::ffi::c_void, ms: i64) -> Result<&mut Vec<EncodeFrame>, i32> {
+        self.frames.clear();
+        self.backend.encode(tex, ms, &mut self.frames)?;
+        Ok(&mut self.frames)
     }
 
     pub fn set_bitrate(&mut self, kbs: i32) -> Result<(), i32> {
-        unsafe {
-            match (self.calls.set_bitrate)(self.codec, kbs) {
-                0 => Ok(()),
-                err => Err(err),
-            }
-        }
+        self.backend.set_bitrate(kbs)
     }
 
     pub fn set_framerate(&mut self, framerate: i32) -> Result<(), i32> {
-        unsafe {
-            match (self.calls.set_framerate)(self.codec, framerate) {
-                0 => Ok(()),
-                err => Err(err),
-            }
-        }
+        self.backend.set_framerate(framerate)
     }
 }
 
 impl Drop for Encoder {
     fn drop(&mut self) {
-        unsafe {
-            (self.calls.destroy)(self.codec);
-            self.codec = std::ptr::null_mut();
-            let _ = Box::from_raw(self.frames);
-            trace!("Encoder dropped");
-        }
+        self.backend.destroy();
+        trace!("Encoder dropped");
     }
-}
-
-pub struct EncodeFrame {
-    pub data: Vec<u8>,
-    pub pts: i64,
-    pub key: i32,
 }
 
 impl Display for EncodeFrame {
@@ -144,6 +89,10 @@ pub fn available(d: DynamicContext) -> Vec<FeatureContext> {
             .drain(..)
             .map(|n| (MFX, n))
             .collect(),
+    );
+    debug!(
+        "编码器候选: {} 个 (driver+format) -> 将逐项 test，通过后可用；纹理与编码器须使用同一 D3D11 设备",
+        natives.len()
     );
     let inputs: Vec<EncodeContext> = natives
         .drain(..)
